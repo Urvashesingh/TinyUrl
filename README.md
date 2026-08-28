@@ -1,8 +1,9 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 through 8 are complete
-and tested; 9 and 10 are written but not cluster-tested.**
+distributed-systems machinery and the reasoning behind it. **All 14 phases are implemented.** Phases 0–8 and 11–13 are verified by running
+them; 9 and 10 (Kubernetes) are schema-validated only, because no cluster was
+available — that gap is stated wherever it matters rather than papered over.
 
 - Node 22 · TypeScript (strict) · Express
 - PostgreSQL via Prisma
@@ -10,7 +11,8 @@ and tested; 9 and 10 are written but not cluster-tested.**
 - Structured JSON logging via pino, with per-request correlation ids
 - Kafka (KRaft) for the durable click-event log
 - Docker Compose for local infrastructure
-- 108 tests on `node:test`, no test framework dependency
+- 113 tests on `node:test`, no test framework dependency
+- Prometheus + Grafana, k6 load tests, GitHub Actions CI
 
 ## Quick start
 
@@ -875,6 +877,49 @@ should never reach a real deployment.
 
 ---
 
+## Phase 13 — CI/CD
+
+Five jobs, split so failures arrive in order of how fast they can be known.
+
+| Job | What it does |
+| --- | --- |
+| `static` | Typecheck and unit tests. No containers, ~1 minute. |
+| `integration` | Brings up Postgres + replica + Redis + Kafka via the same Compose file used locally, migrates, runs the integration suite. |
+| `image` | Builds the runtime image with a GitHub Actions layer cache. |
+| `manifests` | Renders kustomize and validates with `kubeconform -strict`. |
+| `publish` | Builds and pushes to GHCR. Gated — see below. |
+
+### Reusing the Compose file rather than `services:`
+
+GitHub's `services:` block is the obvious choice and the wrong one here. Kafka
+needs two listeners with different advertised addresses, and the replica needs
+a `pg_basebackup` init step — neither fits that block. More importantly,
+expressing the topology twice lets CI and local development drift apart, and
+the first symptom of that drift is a test that passes locally and fails in CI
+for reasons nobody can reproduce.
+
+### Publishing is opt-in on purpose
+
+The `publish` job is gated on `vars.PUBLISH_IMAGE == 'true'` as well as on
+`main`. Pushing a package into someone's registry is a side effect that should
+be chosen, not something a workflow quietly starts doing the moment it merges.
+Turn it on with:
+
+```bash
+gh variable set PUBLISH_IMAGE --body true
+```
+
+### Also here
+
+`concurrency` with `cancel-in-progress`, so a newer push abandons the run it
+supersedes. Every job has a `timeout-minutes`, because the default is six hours
+and a hung job otherwise burns a runner for an afternoon. On failure the
+integration job dumps container logs, since "it failed in CI" is useless
+without them. Dependabot groups minor and patch updates into one PR and leaves
+majors individual, because those need reading rather than merging.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -909,4 +954,4 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 10** — Horizontal Pod Autoscaler *(schema-validated, not cluster-tested)*
 - [x] **Phase 11** — Load test with k6 until it breaks
 - [x] **Phase 12** — Prometheus + Grafana + structured logs
-- [ ] **Phase 13** — CI/CD with GitHub Actions
+- [x] **Phase 13** — CI/CD with GitHub Actions

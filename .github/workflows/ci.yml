@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push makes an in-flight run for the same ref pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Fast feedback: no containers, no database. Runs in about a minute and
+  # catches most mistakes, so it is deliberately a separate job from the slow
+  # one rather than a step inside it.
+  static:
+    name: Typecheck and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:unit
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: postgresql://shortener:shortener@127.0.0.1:5432/shortener?schema=public
+      DATABASE_REPLICA_URL: postgresql://shortener:shortener@127.0.0.1:5433/shortener?schema=public
+      REDIS_URL: redis://127.0.0.1:6379
+      KAFKA_BROKERS: localhost:9092
+      IP_HASH_SALT: ci-salt
+      LOG_LEVEL: silent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The same Compose file used locally, rather than GitHub `services:`.
+      # Kafka needs two listeners with different advertised addresses and the
+      # replica needs a pg_basebackup init step, neither of which fits the
+      # services block -- and duplicating the topology would let CI and local
+      # development drift apart.
+      - name: Start infrastructure
+        run: docker compose up -d postgres postgres-replica redis kafka
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 60); do
+            unhealthy=$(docker ps --filter "health=starting" --format '{{.Names}}')
+            failed=$(docker ps --filter "health=unhealthy" --format '{{.Names}}')
+            if [ -n "$failed" ]; then
+              echo "unhealthy: $failed"; docker compose logs --tail=50; exit 1
+            fi
+            if [ -z "$unhealthy" ]; then echo "all healthy"; exit 0; fi
+            sleep 5
+          done
+          echo "timed out waiting for health"; docker compose logs --tail=80; exit 1
+
+      - run: npx prisma migrate deploy
+
+      - run: npm run test:integration
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+  image:
+    name: Build image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: url-shortener:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  manifests:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Schema validation only -- there is no cluster here, so this catches
+      # wrong API versions and misspelled fields and nothing more.
+      - name: Render and validate
+        run: |
+          kubectl kustomize k8s/ > rendered.yaml
+          docker run --rm -i ghcr.io/yannh/kubeconform:latest \
+            -strict -summary -kubernetes-version 1.30.0 - < rendered.yaml
+
+  publish:
+    name: Publish image
+    needs: [static, integration, image, manifests]
+    # Only on main, and only once deliberately switched on. Publishing a
+    # package to someone's registry is a side effect that should be opted into,
+    # not something a workflow starts doing the moment it is merged.
+    # Enable with: gh variable set PUBLISH_IMAGE --body true
+    if: github.ref == 'refs/heads/main' && vars.PUBLISH_IMAGE == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

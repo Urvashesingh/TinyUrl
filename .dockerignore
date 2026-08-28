@@ -6,6 +6,5 @@ dist
 test
 docker
 k8s
-scripts
 README.md
 .github

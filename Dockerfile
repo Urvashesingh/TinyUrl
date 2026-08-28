@@ -14,6 +14,9 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+# The partition-maintenance CronJob runs scripts/partitions.ts from this stage,
+# so it has to be in the image even though the runtime stage never sees it.
+COPY scripts ./scripts
 RUN npm run build
 
 # --- runtime -----------------------------------------------------------
