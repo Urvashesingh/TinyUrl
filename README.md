@@ -625,7 +625,10 @@ phases is unchanged.
 
 The build stage has the full dependency tree, the TypeScript compiler and
 Prisma generation. The runtime stage has production dependencies, the compiled
-`dist`, and nothing else — 245 MB against 1.35 GB for the build stage.
+`dist`, and nothing else — 537 MB against 895 MB for the build stage. Most of
+what remains is the Prisma query engine and `node_modules`; trimming further
+would mean bundling the app and pruning unused engines, which is real work for
+a real payoff and has not been done here.
 
 The awkward part is Prisma. `npm ci --omit=dev` would run the `postinstall`
 hook, which calls `prisma generate`, which needs the Prisma CLI — a
