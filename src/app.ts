@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import pinoHttp from "pino-http";
 import type { PrismaClient } from "@prisma/client";
+import type Redis from "ioredis";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { decodeCode, encodeId } from "./codes.js";
 import type { LinkCache } from "./cache.js";
 import { createLinkResolver } from "./links.js";
+import { createRateLimiter } from "./rateLimit.js";
 
 type UrlRejection = "missing" | "malformed" | "unsupported_scheme" | "too_long";
 
@@ -46,9 +48,26 @@ function originFor(req: Request): string {
   return config.baseUrl ?? `${req.protocol}://${req.get("host")}`;
 }
 
-export function createApp(prisma: PrismaClient, cache: LinkCache): Express {
+export interface AppDeps {
+  /** Primary. All writes go here. */
+  prisma: PrismaClient;
+  cache: LinkCache;
+  redis: Redis;
+}
+
+export function createApp(deps: AppDeps): Express {
+  const { prisma, cache, redis } = deps;
   const app = express();
   const resolveLink = createLinkResolver(prisma, cache);
+
+  const limitCreates = createRateLimiter(redis, {
+    name: "create",
+    ...config.createRateLimit,
+  });
+  const limitRedirects = createRateLimiter(redis, {
+    name: "redirect",
+    ...config.redirectRateLimit,
+  });
 
   app.disable("x-powered-by");
   if (config.trustProxy) {
@@ -101,7 +120,7 @@ export function createApp(prisma: PrismaClient, cache: LinkCache): Express {
     }
   });
 
-  app.post("/links", async (req, res, next) => {
+  app.post("/links", limitCreates, async (req, res, next) => {
     try {
       const parsed = parseLongUrl(req.body?.longUrl);
       if ("reason" in parsed) {
@@ -138,7 +157,7 @@ export function createApp(prisma: PrismaClient, cache: LinkCache): Express {
   });
 
   // Must stay below every other route: it matches any single path segment.
-  app.get("/:code", async (req, res, next) => {
+  app.get("/:code", limitRedirects, async (req, res, next) => {
     try {
       const { code } = req.params;
 

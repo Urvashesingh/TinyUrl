@@ -1,15 +1,15 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 and 1 are
+distributed-systems machinery and the reasoning behind it. **Phases 0 through 2 are
 complete and tested.**
 
 - Node 22 · TypeScript (strict) · Express
 - PostgreSQL via Prisma
-- Redis for cache-aside reads
+- Redis for cache-aside reads and sliding-window rate limiting
 - Structured JSON logging via pino, with per-request correlation ids
 - Docker Compose for local infrastructure
-- 49 tests on `node:test`, no test framework dependency
+- 58 tests on `node:test`, no test framework dependency
 
 ## Quick start
 
@@ -275,13 +275,64 @@ host, and `allkeys-lru` so it evicts cold keys instead of erroring on OOM.
 
 ---
 
+## Phase 2 — rate limiting
+
+### Sliding window log, in one atomic script
+
+Each caller gets a Redis sorted set of request timestamps. A check drops
+entries older than the window, counts what remains, and admits the request if
+that count is under the limit.
+
+The alternatives and why not:
+
+| Algorithm | Why not |
+| --- | --- |
+| Fixed window | Allows 2x the limit across a boundary — spend a full quota at 11:59:59 and another at 12:00:00 |
+| Token bucket | Allows deliberate bursts, which is a feature for a paid API and a bug for abuse control |
+| Sliding log | Exact, and memory is bounded by the limit itself — a few dozen bytes per caller at these limits |
+
+The whole read-modify-write runs as one Lua script, so it is atomic. Doing it
+with separate `ZCARD` and `ZADD` calls leaves a race where concurrent requests
+all observe the same under-limit count and all get admitted — precisely the
+burst the limiter exists to stop. A test fires 40 concurrent requests at a
+limit of 5 and asserts exactly 5 get through.
+
+### Two budgets, not one
+
+Creation is capped hard (20/min): it writes a row and mints a permanent public
+identifier. Redirects are capped loosely (600/min) — that ceiling exists to
+blunt scanners, not to ration real traffic. They are separate key namespaces,
+so a burst of creates cannot exhaust the budget that redirects depend on.
+There is a test for exactly that, because sharing a key here is an easy and
+very damaging mistake.
+
+### Failing open, deliberately
+
+If Redis is unreachable the limiter admits the request and logs a warning. The
+trade is explicit: for the duration of an outage there is no rate limiting at
+all. Failing closed would convert a cache outage into a total outage, which is
+strictly worse — and the limiter exists to protect against abuse, not to be a
+availability dependency of the thing it protects.
+
+The same startup caveat applies: a burst arriving in the few milliseconds
+before the Redis connection is ready is unlimited.
+
+### Limits are per-IP, which is a real weakness
+
+`req.ip` is the identity, honoured through `trust proxy`. That is fine against
+casual abuse and useless against a botnet or a shared NAT — the former gets a
+fresh budget per address, the latter shares one budget among unrelated users.
+The real answer is per-account limits once there are accounts, with IP limits
+as the outer bound.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
 
-- **No rate limiting.** Anyone can create links in a loop. That is Phase 2, and
-  it is the reason this is not deployed publicly yet: an open, unauthenticated
-  shortener is phishing infrastructure waiting to be found.
+- **Rate limits are per-IP**, so a botnet or a shared NAT both defeat them in
+  opposite ways. Per-account limits need accounts.
 - **No auth.** Links are anonymous and permanent; there is no way to list, edit,
   revoke, or expire one.
 - **Single-flight is per-process**, as discussed above.
@@ -296,7 +347,7 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 
 - [x] **Phase 0** — Core API: create short link + redirect
 - [x] **Phase 1** — Redis cache (cache-aside) + structured logging
-- [ ] **Phase 2** — Rate limiter (Redis)
+- [x] **Phase 2** — Rate limiter (Redis)
 - [ ] **Phase 3** — Redirect events via Redis pub/sub
 - [ ] **Phase 4** — Swap pub/sub for Kafka/RabbitMQ
 - [ ] **Phase 5** — Live trending leaderboard (WebSockets + Redis sorted sets)

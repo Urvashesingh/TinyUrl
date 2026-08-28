@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "node --import tsx --test test/base62.test.ts test/codes.test.ts test/links.test.ts",
-    "test:integration": "node --import tsx --test test/cache.test.ts test/api.test.ts",
+    "test:integration": "node --import tsx --test test/cache.test.ts test/rateLimit.test.ts test/api.test.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio"

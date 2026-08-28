@@ -1,13 +1,15 @@
 import { PrismaClient } from "@prisma/client";
 import { createApp } from "./app.js";
 import { createLinkCache } from "./cache.js";
+import { closeRedis, createRedis } from "./redis.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 
 const prisma = new PrismaClient();
-const cache = createLinkCache();
+const redis = createRedis("api");
+const cache = createLinkCache(redis);
 
-const server = createApp(prisma, cache).listen(config.port, () => {
+const server = createApp({ prisma, cache, redis }).listen(config.port, () => {
   logger.info({ port: config.port }, "listening");
 });
 
@@ -32,7 +34,7 @@ async function shutdown(signal: string): Promise<void> {
   forceExit.unref();
 
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  await Promise.allSettled([prisma.$disconnect(), cache.close()]);
+  await Promise.allSettled([prisma.$disconnect(), closeRedis(redis)]);
   process.exit(0);
 }
 

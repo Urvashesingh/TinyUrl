@@ -52,7 +52,9 @@ function fakeCache(seed: Record<string, CacheLookup> = {}) {
       writes.push({ code, longUrl: null });
       entries.set(code, { state: "known-missing" });
     },
-    async close() {},
+    async forget(code) {
+      entries.delete(code);
+    },
   };
 
   return { cache, writes };
@@ -151,7 +153,7 @@ describe("createLinkResolver", () => {
       },
       async remember() {},
       async rememberMissing() {},
-      async close() {},
+      async forget() {},
     };
 
     const resolve = createLinkResolver(prisma.client, deadCache);

@@ -54,4 +54,23 @@ export const config = {
   missCacheTtlSeconds: readInteger("MISS_CACHE_TTL_SECONDS", 30),
 
   logLevel: process.env.LOG_LEVEL ?? "info",
+
+  /**
+   * Creation is the expensive, abusable path: it writes a row and mints a
+   * permanent public identifier. Kept deliberately tight.
+   */
+  createRateLimit: {
+    limit: readInteger("CREATE_RATE_LIMIT", 20),
+    windowSeconds: readInteger("CREATE_RATE_WINDOW_SECONDS", 60),
+  },
+
+  /**
+   * Redirects are the product, so this ceiling exists to blunt scanners rather
+   * than to ration real traffic. It sits far above anything a human browsing
+   * links could produce.
+   */
+  redirectRateLimit: {
+    limit: readInteger("REDIRECT_RATE_LIMIT", 600),
+    windowSeconds: readInteger("REDIRECT_RATE_WINDOW_SECONDS", 60),
+  },
 } as const;

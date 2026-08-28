@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import { PrismaClient } from "@prisma/client";
 import { createApp } from "../src/app.js";
 import { createLinkCache, type LinkCache } from "../src/cache.js";
+import { closeRedis, createRedis } from "../src/redis.js";
+import type Redis from "ioredis";
 import { encodeId } from "../src/codes.js";
 import { logger } from "../src/logger.js";
+import { config } from "../src/config.js";
 
 // Integration tests: these talk to the Postgres from docker-compose. Rows they
 // create are tracked and removed in `after`, so repeated runs stay clean.
@@ -14,6 +17,10 @@ import { logger } from "../src/logger.js";
 const prisma = new PrismaClient();
 const createdCodes: string[] = [];
 let cache: LinkCache;
+let redis: Redis;
+// A second, ordinary client for test bookkeeping. The app's client has offline
+// queueing disabled by design, so it cannot be used before it is ready.
+let admin: Redis;
 
 let server: Server;
 let origin: string;
@@ -41,16 +48,38 @@ before(async () => {
   // by running the app at all, not by asserting on its output.
   logger.level = "silent";
 
-  cache = createLinkCache();
-  server = createApp(prisma, cache).listen(0);
+  const { default: Redis } = await import("ioredis");
+  admin = new Redis(config.redisUrl);
+  await admin.ping();
+
+  redis = createRedis("test");
+  // enableOfflineQueue is false, so commands issued before the socket is up
+  // are rejected outright. Wait for readiness rather than racing it.
+  if (redis.status !== "ready") {
+    await new Promise((resolve) => redis.once("ready", resolve));
+  }
+
+  cache = createLinkCache(redis);
+  server = createApp({ prisma, cache, redis }).listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+});
+
+// Only this suite's own limiter scopes: test files run in parallel processes
+// against one Redis, so a broad wildcard delete would sabotage its neighbours.
+beforeEach(async () => {
+  const keys = await admin.keys("rl:create:*");
+  const more = await admin.keys("rl:redirect:*");
+  const all = [...keys, ...more];
+  if (all.length > 0) {
+    await admin.del(...all);
+  }
 });
 
 after(async () => {
   await prisma.link.deleteMany({ where: { code: { in: createdCodes } } });
   await new Promise((resolve) => server.close(resolve));
-  await Promise.allSettled([prisma.$disconnect(), cache.close()]);
+  await Promise.allSettled([prisma.$disconnect(), closeRedis(redis), admin.quit()]);
 });
 
 describe("GET /health", () => {
@@ -213,5 +242,35 @@ describe("caching and observability", () => {
   it("mints a request id when the caller does not supply one", async () => {
     const response = await api("/health");
     assert.match(response.headers.get("x-request-id") ?? "", /[0-9a-f-]{36}/);
+  });
+});
+
+describe("rate limiting", () => {
+  it("refuses creation past the configured limit", async () => {
+    // Proves the limiter is actually mounted on the route, which the
+    // middleware's own unit tests cannot tell us.
+    const limit = config.createRateLimit.limit;
+    const statuses: number[] = [];
+
+    for (let i = 0; i < limit + 3; i += 1) {
+      statuses.push((await createLink(`https://example.com/burst/${i}`)).status);
+    }
+
+    assert.equal(statuses.filter((s) => s === 201).length, limit);
+    assert.ok(statuses.slice(-3).every((s) => s === 429), "the overflow must be refused");
+  });
+
+  it("does not let creation exhaust the redirect budget", async () => {
+    // Separate scopes, separate budgets. If these shared a key, a burst of
+    // creates would break every redirect on the service.
+    const { code } = (await (await createLink("https://example.com/still-works")).json()) as {
+      code: string;
+    };
+
+    for (let i = 0; i < config.createRateLimit.limit + 2; i += 1) {
+      await createLink(`https://example.com/noise/${i}`);
+    }
+
+    assert.equal((await api(`/${code}`)).status, 302);
   });
 });

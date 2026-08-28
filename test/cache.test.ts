@@ -3,6 +3,7 @@ import { after, before, describe, it } from "node:test";
 import Redis from "ioredis";
 import { config } from "../src/config.js";
 import { createLinkCache, type LinkCache } from "../src/cache.js";
+import { closeRedis, createRedis } from "../src/redis.js";
 
 // Integration tests against the Redis from docker-compose.
 
@@ -10,14 +11,16 @@ const PREFIX = "link:v1:";
 
 let cache: LinkCache;
 let redis: Redis;
+let cacheRedis: Redis;
 
 function uniqueCode(): string {
   return `t${Math.random().toString(36).slice(2, 8)}`;
 }
 
 before(async () => {
-  cache = createLinkCache();
   redis = new Redis(config.redisUrl);
+  cacheRedis = createRedis("test-cache");
+  cache = createLinkCache(cacheRedis);
   await redis.ping();
 });
 
@@ -26,8 +29,7 @@ after(async () => {
   if (keys.length > 0) {
     await redis.del(...keys);
   }
-  await cache.close();
-  await redis.quit();
+  await Promise.allSettled([redis.quit(), closeRedis(cacheRedis)]);
 });
 
 describe("createLinkCache", () => {

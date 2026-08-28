@@ -1,6 +1,5 @@
-import Redis from "ioredis";
+import type Redis from "ioredis";
 import { config } from "./config.js";
-import { logger } from "./logger.js";
 
 export type CacheLookup =
   | { state: "hit"; longUrl: string }
@@ -11,7 +10,7 @@ export interface LinkCache {
   lookup(code: string): Promise<CacheLookup>;
   remember(code: string, longUrl: string): Promise<void>;
   rememberMissing(code: string): Promise<void>;
-  close(): Promise<void>;
+  forget(code: string): Promise<void>;
 }
 
 // Versioned key prefix. If the stored shape ever changes, bumping this rolls
@@ -27,35 +26,7 @@ function keyFor(code: string): string {
   return `${KEY_PREFIX}${code}`;
 }
 
-export function createLinkCache(): LinkCache {
-  const redis = new Redis(config.redisUrl, {
-    // The cache is an optimization, never a dependency. If Redis is down a
-    // command must fail immediately so the request falls through to Postgres:
-    //   enableOfflineQueue: false  do not park commands until reconnect
-    //   maxRetriesPerRequest: 1    do not spend the caller's latency retrying
-    // Without these two, an outage turns into every request hanging rather
-    // than every request getting slower, which is far worse.
-    enableOfflineQueue: false,
-    maxRetriesPerRequest: 1,
-    connectTimeout: 1_000,
-    retryStrategy: (attempt) => Math.min(attempt * 200, 5_000),
-  });
-
-  // ioredis emits "error" on every failed reconnect. An EventEmitter with no
-  // error listener throws, so this handler is what keeps a Redis outage from
-  // taking the process down with it.
-  let lastErrorLoggedAt = 0;
-  redis.on("error", (error: Error) => {
-    // Reconnect storms would otherwise write thousands of identical lines.
-    const now = Date.now();
-    if (now - lastErrorLoggedAt > 10_000) {
-      lastErrorLoggedAt = now;
-      logger.warn({ err: error.message }, "redis unavailable, serving from postgres");
-    }
-  });
-
-  redis.on("ready", () => logger.info("redis connected"));
-
+export function createLinkCache(redis: Redis): LinkCache {
   return {
     async lookup(code) {
       try {
@@ -87,8 +58,12 @@ export function createLinkCache(): LinkCache {
       }
     },
 
-    async close() {
-      await redis.quit().catch(() => redis.disconnect());
+    async forget(code) {
+      try {
+        await redis.del(keyFor(code));
+      } catch {
+        // The entry expires on its own; this only shortens the window.
+      }
     },
   };
 }
