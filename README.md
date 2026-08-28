@@ -128,7 +128,10 @@ creation needs the header and redirects stay public — which is the correct
 split, because the entire point of a short link is that anyone can follow it.
 
 ```bash
-curl -X POST https://your-app.vercel.app/links   -H "Content-Type: application/json"   -H "X-API-Key: <your key>"   -d '{"longUrl":"https://example.com/a/very/long/url"}'
+curl -X POST https://your-app.vercel.app/links \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your key>" \
+  -d '{"longUrl":"https://example.com/a/very/long/url"}'
 ```
 
 Then open the `shortUrl` it returns.
