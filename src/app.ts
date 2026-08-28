@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import express, {
   type Express,
   type NextFunction,
@@ -147,6 +148,11 @@ export function createApp(deps: AppDeps): Express {
   app.use(metricsMiddleware());
   app.use(express.json({ limit: config.jsonBodyLimit }));
 
+  // The demo console. Resolved relative to this module so it works both from
+  // src (tsx) and from dist (compiled), which land at the same depth.
+  const consolePage = fileURLToPath(new URL("../public/index.html", import.meta.url));
+  app.get("/", (_req, res) => res.sendFile(consolePage));
+
   // Deliberately above the rate limiters and outside the click path: a scrape
   // is not user traffic. In Kubernetes this is reached through the pod IP, not
   // through the ingress, so it is not publicly exposed.
@@ -187,6 +193,35 @@ export function createApp(deps: AppDeps): Express {
     }
 
     return res.json({ status: "ready", profile: config.profile, replicaLagSeconds });
+  });
+
+  // Recent links with their click counts, for the console. Behind the same key
+  // as creation: listing every short link on a public deployment would hand a
+  // scanner the entire table without it needing to guess a single code.
+  app.get("/links", requireApiKey, async (_req, res, next) => {
+    try {
+      const rows = await replica.$queryRaw<
+        Array<{ code: string; longUrl: string; createdAt: Date; clicks: bigint }>
+      >`
+        SELECT l.code, l."longUrl", l."createdAt", count(c.id) AS clicks
+        FROM links l
+        LEFT JOIN click_events c ON c.code = l.code
+        GROUP BY l.code, l."longUrl", l."createdAt"
+        ORDER BY l."createdAt" DESC
+        LIMIT 20
+      `;
+
+      return res.json({
+        links: rows.map((row) => ({
+          code: row.code,
+          longUrl: row.longUrl,
+          createdAt: row.createdAt.toISOString(),
+          clicks: Number(row.clicks),
+        })),
+      });
+    } catch (error) {
+      return next(error);
+    }
   });
 
   app.post("/links", limitCreates, requireApiKey, async (req, res, next) => {

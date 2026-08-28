@@ -453,3 +453,39 @@ describe("metrics", () => {
     assert.ok(!body.includes('route="/metrics"'), "scraping must not appear as traffic");
   });
 });
+
+describe("demo console", () => {
+  it("serves the console at the root", async () => {
+    const response = await api("/");
+    const body = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/);
+    assert.match(body, /<title>URL Shortener/);
+  });
+
+  it("lists recent links with their click counts", async () => {
+    const longUrl = "https://example.com/console-listing";
+    const { code } = (await (await createLink(longUrl)).json()) as { code: string };
+
+    const body = (await (await api("/links")).json()) as {
+      links: Array<{ code: string; longUrl: string; clicks: number }>;
+    };
+
+    const found = body.links.find((l) => l.code === code);
+    assert.ok(found, "a freshly created link must appear in the listing");
+    assert.equal(found.longUrl, longUrl);
+    assert.equal(typeof found.clicks, "number");
+  });
+
+  it("does not let the root path shadow a short code", async () => {
+    // GET / serves HTML while GET /:code redirects. Route order decides which
+    // wins, and getting it wrong would break every link on the service.
+    const longUrl = "https://example.com/not-shadowed";
+    const { code } = (await (await createLink(longUrl)).json()) as { code: string };
+
+    const response = await api(`/${code}`);
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("location"), longUrl);
+  });
+});

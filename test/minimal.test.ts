@@ -120,6 +120,23 @@ describe("API key gate", () => {
   });
 });
 
+describe("console endpoints", () => {
+  it("serves the console even in the minimal profile", async () => {
+    const response = await api("/");
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/);
+  });
+
+  it("gates the link listing behind the same key as creation", async () => {
+    // Listing every short link on a public deployment would hand a scanner the
+    // whole table without it needing to guess a single code.
+    assert.equal((await api("/links")).status, 401);
+
+    const allowed = await api("/links", { headers: { "X-API-Key": "test-key" } });
+    assert.equal(allowed.status, 200);
+  });
+});
+
 describe("features that need a long-lived process", () => {
   it("does not expose trending, which is backed by Redis", async () => {
     // Omitted rather than stubbed: a board that is always empty looks broken.

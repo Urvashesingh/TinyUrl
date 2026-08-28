@@ -36,6 +36,8 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/dist ./dist
+# The demo console is served by GET /, so it has to be in the runtime image.
+COPY public ./public
 
 # node:alpine ships an unprivileged "node" user. Running as root inside a
 # container is a container escape away from being root on the host.

@@ -6,6 +6,12 @@
 # rather than the system behind it, and every run would flatten at 10 req/s.
 services:
   api:
+    # !override replaces the base port mapping rather than merging with it: a
+    # single fixed host port cannot be scaled past one replica, and merging
+    # would keep it and collide. The range is deliberately away from 3000 so a
+    # load-test stack is never mistaken for the demo stack.
+    ports: !override
+      - "3100-3110:3000"
     environment:
       CREATE_RATE_LIMIT: "100000"
       REDIRECT_RATE_LIMIT: "10000000"

@@ -170,8 +170,12 @@ services:
       IP_HASH_SALT: compose-development-salt
       BASE_URL: http://localhost:3000
       LOG_LEVEL: info
+    # A fixed port, so the console is always at localhost:3000. A range would
+    # let Docker pick, and "which port is it on today" is a bad question to
+    # answer in front of an audience. Scaling overrides this -- see
+    # docker-compose.loadtest.yml.
     ports:
-      - "3000-3010:3000"
+      - "3000:3000"
     depends_on:
       postgres:
         condition: service_healthy

@@ -10,8 +10,9 @@ available — that gap is stated wherever it matters rather than papered over.
 - Redis for cache-aside reads and sliding-window rate limiting
 - Structured JSON logging via pino, with per-request correlation ids
 - Kafka (KRaft) for the durable click-event log
+- A small HTML console at `/` so the whole pipeline is visible, not just curl-able
 - Docker Compose for local infrastructure
-- 123 tests on `node:test`, no test framework dependency
+- 136 tests on `node:test`, no test framework dependency
 - Prometheus + Grafana, k6 load tests, GitHub Actions CI
 
 ## Quick start
@@ -33,6 +34,34 @@ npm run build && npm start    # compiled
 `npm test` expects the Compose Postgres and Redis to be up; the integration
 suite drives a real HTTP server against both and cleans up what it creates.
 `npm run test:unit` needs neither and runs in about a second.
+
+## Demo (local)
+
+```bash
+docker compose --profile app up -d     # whole system: 8 containers
+npm run demo                           # seed links and clicks
+```
+
+| | |
+| --- | --- |
+| **http://localhost:3000** | Console — create a link, follow it, watch trending update live |
+| **http://localhost:3001** | Grafana — latency, cache hit rate, event loop lag |
+| http://localhost:9090 | Prometheus, if the alert rules come up |
+
+The console is one self-contained HTML file served by `GET /`. It creates
+links, lists recent ones with their click counts, and subscribes to `/live` for
+the trending board — so a click in one browser tab visibly moves the ranking in
+another. That is the whole pipeline made visible: redirect → Kafka → consumer →
+Postgres → Redis sorted set → WebSocket.
+
+`npm run demo` exists because an empty leaderboard makes a working system look
+broken, and typing curl commands while someone watches is a poor use of their
+attention. It seeds six links with an uneven click distribution so the ranking
+is real rather than a row of ones.
+
+The API port is fixed at 3000 rather than a range, because "which port is it on
+today" is a bad question to answer in front of an audience. Scaling for load
+tests overrides it — see `docker-compose.loadtest.yml`.
 
 ## Two ways to run it
 
@@ -122,6 +151,8 @@ needs an account this environment does not have.
 
 | Method | Path      | Behaviour |
 | ------ | --------- | --------- |
+| `GET`  | `/`       | The demo console (HTML). |
+| `GET`  | `/links`  | Recent links with click counts. Requires `X-API-Key` when `CREATE_API_KEY` is set. |
 | `GET`  | `/health` | Liveness. Always `200` while the process is up; never touches Postgres. |
 | `GET`  | `/ready`  | Readiness. `200` when Postgres answers, `503` when it does not. Redis being down does **not** fail this. |
 | `POST` | `/links`  | `201` with the created link. Requires `X-API-Key` when `CREATE_API_KEY` is set. `400` on an invalid `longUrl`, `413` on an oversized body. |
