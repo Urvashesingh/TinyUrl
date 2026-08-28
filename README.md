@@ -1,7 +1,7 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 through 7 are
+distributed-systems machinery and the reasoning behind it. **Phases 0 through 8 are
 complete and tested.**
 
 - Node 22 · TypeScript (strict) · Express
@@ -610,6 +610,60 @@ unindexed.
 
 ---
 
+## Phase 8 — containerising the application
+
+```bash
+docker compose up -d                  # infrastructure only (dev workflow)
+docker compose --profile app up -d    # everything, including api + consumer
+```
+
+The app services sit behind a `app` Compose profile so the default `up`
+still starts only infrastructure and the `npm run dev` loop from earlier
+phases is unchanged.
+
+### Multi-stage, and what stays behind
+
+The build stage has the full dependency tree, the TypeScript compiler and
+Prisma generation. The runtime stage has production dependencies, the compiled
+`dist`, and nothing else — 245 MB against 1.35 GB for the build stage.
+
+The awkward part is Prisma. `npm ci --omit=dev` would run the `postinstall`
+hook, which calls `prisma generate`, which needs the Prisma CLI — a
+devDependency deliberately absent from the runtime image. So the runtime
+install passes `--ignore-scripts` and the generated client is copied from the
+build stage instead.
+
+The second Prisma detail: the container is Alpine (musl) and the host is not,
+and Prisma ships a per-platform query engine. Without
+`binaryTargets = ["native", "linux-musl-openssl-3.0.x"]` the image builds
+cleanly, starts cleanly, and then fails on its first query.
+
+### Migrations are their own service
+
+`migrate` runs `prisma migrate deploy` once and exits; `api` and `consumer`
+both `depend_on` it with `condition: service_completed_successfully`, so
+nothing serves traffic against a schema that has not been migrated. It builds
+from the `build` target, because that is where the Prisma CLI lives.
+
+### Details that matter
+
+- **Non-root.** `USER node`. Running as root inside a container is one escape
+  away from root on the host. Verified: `uid=1000(node)`.
+- **Layer ordering.** `package*.json` and `prisma/` are copied before `src/`,
+  so editing a source file does not invalidate the dependency layer.
+- **Healthcheck hits `/health`, not `/ready`** — same reasoning as Kubernetes
+  liveness. A database blip must not restart every healthy container.
+- **The consumer has no healthcheck and no port.** It serves nothing; an HTTP
+  probe would be theatre.
+- **`KAFKA_BROKERS: kafka:29092`**, the INTERNAL listener. `localhost:9092`
+  only resolves correctly from the host, and using it here is the classic
+  "connects, then hangs" failure.
+
+Verified end to end through containers: create, seven redirects, Kafka,
+consumer, Postgres, and the trending board all agreeing on seven clicks.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -638,7 +692,7 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 5** — Live trending leaderboard (WebSockets + Redis sorted sets)
 - [x] **Phase 6** — Postgres read replica + read/write split
 - [x] **Phase 7** — Partition the click-events table
-- [ ] **Phase 8** — Dockerize all services + compose
+- [x] **Phase 8** — Dockerize all services + compose
 - [ ] **Phase 9** — Kubernetes (minikube)
 - [ ] **Phase 10** — Horizontal Pod Autoscaler
 - [ ] **Phase 11** — Load test with k6 until it breaks

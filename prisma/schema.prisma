@@ -1,5 +1,9 @@
 generator client {
   provider = "prisma-client-js"
+  // The container runs on Alpine (musl), the host is Windows/glibc. Prisma
+  // ships a per-platform query engine, so both targets have to be generated or
+  // the image starts and then fails on its first query.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {

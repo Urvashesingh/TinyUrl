@@ -130,6 +130,79 @@ services:
       retries: 10
       start_period: 30s
 
+  # --- application services ---------------------------------------------
+  # Behind the "app" profile, so `docker compose up -d` still starts only the
+  # infrastructure and the npm run dev workflow from earlier phases is
+  # unchanged. `docker compose --profile app up -d` runs the whole system.
+
+  # One-shot. Migrations must complete before anything serves traffic, and they
+  # run from the build stage because the Prisma CLI is a devDependency that is
+  # deliberately absent from the runtime image.
+  migrate:
+    build:
+      context: .
+      target: build
+    image: url-shortener-migrate:local
+    profiles: ["app"]
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://shortener:shortener@postgres:5432/shortener?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    image: url-shortener:local
+    container_name: shortener-api
+    profiles: ["app"]
+    restart: unless-stopped
+    environment: &app-env
+      DATABASE_URL: postgresql://shortener:shortener@postgres:5432/shortener?schema=public
+      DATABASE_REPLICA_URL: postgresql://shortener:shortener@postgres-replica:5432/shortener?schema=public
+      REDIS_URL: redis://redis:6379
+      # The INTERNAL listener, not localhost:9092 -- that one only resolves
+      # correctly from the host.
+      KAFKA_BROKERS: kafka:29092
+      EVENT_TRANSPORT: kafka
+      IP_HASH_SALT: compose-development-salt
+      BASE_URL: http://localhost:3000
+      LOG_LEVEL: info
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  consumer:
+    build: .
+    image: url-shortener:local
+    container_name: shortener-consumer
+    profiles: ["app"]
+    restart: unless-stopped
+    command: ["node", "dist/consumer.js"]
+    environment: *app-env
+    # No port and no HTTP healthcheck: this process serves nothing. Its
+    # liveness signal is that it stays connected to its consumer group.
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   postgres-data:
   postgres-replica-data:

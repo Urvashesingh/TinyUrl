@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+.env
+*.log
+test
+docker
+k8s
+scripts
+README.md
+.github
