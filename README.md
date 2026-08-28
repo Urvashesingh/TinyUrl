@@ -1,20 +1,21 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 through 3 are
+distributed-systems machinery and the reasoning behind it. **Phases 0 through 4 are
 complete and tested.**
 
 - Node 22 · TypeScript (strict) · Express
 - PostgreSQL via Prisma
 - Redis for cache-aside reads and sliding-window rate limiting
 - Structured JSON logging via pino, with per-request correlation ids
+- Kafka (KRaft) for the durable click-event log
 - Docker Compose for local infrastructure
-- 78 tests on `node:test`, no test framework dependency
+- 81 tests on `node:test`, no test framework dependency
 
 ## Quick start
 
 ```bash
-docker compose up -d          # Postgres + Redis
+docker compose up -d          # Postgres + Redis + Kafka
 cp .env.example .env
 npm install
 npx prisma migrate dev
@@ -380,6 +381,68 @@ for Phase 4.
 
 ---
 
+## Phase 4 — Kafka instead of pub/sub
+
+Same publisher contract, different guarantees. `EVENT_TRANSPORT` selects
+`redis` (Phase 3) or `kafka` (default), which is what makes the two directly
+comparable.
+
+### What actually changed
+
+Redis pub/sub is a fan-out with no storage: publish into a room with nobody in
+it and the message is gone. Kafka is an append-only log — the broker keeps the
+event, and each consumer group tracks its own offset into it.
+
+The same experiment, run against both transports:
+
+| | consumer down during 6 clicks | after consumer starts |
+| --- | --- | --- |
+| Phase 3, Redis pub/sub | redirects served | **clicks lost permanently** |
+| Phase 4, Kafka | redirects served | **all 6 replayed and recorded** |
+
+That is the whole phase. Everything else follows from the log being durable.
+
+### Write first, acknowledge second
+
+The consumer uses `eachBatch` with auto-resolve off: it writes the batch to
+Postgres, *then* resolves offsets and commits. That ordering is what makes
+delivery at-least-once — a crash between the write and the commit replays the
+batch, so events can be duplicated but never lost. Committing first inverts the
+guarantee and loses them instead.
+
+The honest consequence: **click counts can over-count after a consumer crash.**
+Fixing that needs a deduplication key — an event id carried from the publisher
+and a unique index — which is a real cost, and for a view counter the trade is
+usually not worth paying. For anything that bills or audits, it is.
+
+Rebalances are handled explicitly: if `isRunning()` or `isStale()` goes false
+mid-batch the handler returns without committing, because committing would
+acknowledge work another group member is about to redo.
+
+### Partitioning by code
+
+Messages are keyed by short code, so every event for one link lands on the same
+partition. That buys per-link ordering and lets a consumer aggregate a link's
+clicks without coordinating across partitions — which is what Phase 5's
+leaderboard depends on. Tested directly: 12 events with one key land on exactly
+one partition, and 40 distinct keys spread across several.
+
+Partition count is set explicitly (3) and auto-creation is disabled on the
+broker, because an auto-created topic silently takes the broker default of one
+partition — and partition count cannot be lowered later, nor raised without
+rehashing keys to different partitions and breaking ordering for existing ones.
+It also caps consumer parallelism: one partition is read by at most one member
+of a group, so three partitions means at most three useful consumer instances.
+
+### Still fire-and-forget
+
+`publishClick` still returns `void`. The producer batches and flushes in the
+background, so the redirect never waits on the broker. The difference is only
+in what happens afterwards. Shutdown does disconnect the producer, so buffered
+batches flush rather than dying with the process.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -390,6 +453,8 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
   revoke, or expire one.
 - **Single-flight is per-process**, as discussed above.
 - **No cache metrics.** Hit rate is greppable from logs, not measurable. Phase 12.
+- **Click counts can over-count** after a consumer crash, because delivery is
+  at-least-once with no dedup key.
 - **Single instance.** No connection-pool tuning, no read replica.
 - **The multiplier is not secret**, as discussed above.
 - **`npm audit` reports 3 high advisories** in `deepmerge-ts`, reached only
@@ -402,7 +467,7 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 1** — Redis cache (cache-aside) + structured logging
 - [x] **Phase 2** — Rate limiter (Redis)
 - [x] **Phase 3** — Redirect events via Redis pub/sub
-- [ ] **Phase 4** — Swap pub/sub for Kafka/RabbitMQ
+- [x] **Phase 4** — Swap pub/sub for Kafka/RabbitMQ
 - [ ] **Phase 5** — Live trending leaderboard (WebSockets + Redis sorted sets)
 - [ ] **Phase 6** — Postgres read replica + read/write split
 - [ ] **Phase 7** — Partition the click-events table

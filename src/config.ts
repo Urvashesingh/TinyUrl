@@ -76,6 +76,25 @@ export const config = {
    */
   ipHashSalt: process.env.IP_HASH_SALT ?? "local-development-salt",
 
+  /**
+   * Which transport carries click events. "redis" is Phase 3 pub/sub, which is
+   * at-most-once and loses everything published while no consumer is
+   * connected. "kafka" is Phase 4: durable, replayable, at-least-once.
+   */
+  eventTransport: (process.env.EVENT_TRANSPORT ?? "kafka") as "redis" | "kafka",
+
+  kafka: {
+    brokers: (process.env.KAFKA_BROKERS ?? "localhost:9092").split(",").map((b) => b.trim()),
+    groupId: process.env.KAFKA_GROUP_ID ?? "click-consumer",
+    /**
+     * Partition count is effectively permanent: raising it later rehashes keys
+     * to different partitions and breaks per-key ordering for existing keys.
+     * It also caps consumer parallelism, since one partition is consumed by at
+     * most one member of a group.
+     */
+    partitions: readInteger("CLICK_TOPIC_PARTITIONS", 3),
+  },
+
   /** Analytics batching: flush on whichever trigger fires first. */
   clickBatch: {
     maxSize: readInteger("CLICK_BATCH_SIZE", 100),
