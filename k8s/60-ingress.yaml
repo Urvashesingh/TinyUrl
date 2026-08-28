@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shortener
+  namespace: shortener
+  annotations:
+    # Redirects are tiny and must never be cached by the ingress: every click
+    # has to reach the service to be counted.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  rules:
+    - host: sho.rt
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shortener-api
+                port:
+                  name: http

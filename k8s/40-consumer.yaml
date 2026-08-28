@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shortener-consumer
+  namespace: shortener
+  labels:
+    app: shortener
+    component: consumer
+spec:
+  # Capped by the topic's partition count, not by load.
+  #
+  # A Kafka partition is consumed by at most one member of a consumer group, so
+  # with three partitions a fourth replica does nothing at all except join the
+  # group and sit idle -- while still forcing a rebalance every time it starts
+  # or stops. This is why the consumer has no HPA: the ceiling is a property of
+  # the topic, and raising it means repartitioning, which rehashes keys and
+  # breaks per-link ordering.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: shortener
+      component: consumer
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        app: shortener
+        component: consumer
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: consumer
+          image: url-shortener:local
+          command: ["node", "dist/consumer.js"]
+          envFrom:
+            - configMapRef:
+                name: shortener-config
+            - secretRef:
+                name: shortener-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # No HTTP probes: this process listens on nothing. A liveness probe
+          # here would have to be a real health signal -- consumer group
+          # membership or lag -- and a fake HTTP endpoint added just to satisfy
+          # a probe would report healthy while the consumer was wedged.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: shortener-partitions
+  namespace: shortener
+spec:
+  # Monthly, well before the month it provisions is needed. Keeping partitions
+  # ahead is what keeps the DEFAULT partition empty -- and a non-empty default
+  # makes creating that month's partition fail. See the Phase 7 notes.
+  schedule: "0 3 1 * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: partitions
+              image: url-shortener-migrate:local
+              command: ["npx", "tsx", "scripts/partitions.ts"]
+              envFrom:
+                - configMapRef:
+                    name: shortener-config
+                - secretRef:
+                    name: shortener-secrets
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  memory: 256Mi

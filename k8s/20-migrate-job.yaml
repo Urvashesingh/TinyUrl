@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shortener-migrate
+  namespace: shortener
+spec:
+  backoffLimit: 3
+  # Keep a finished job around briefly for inspection, then clean up.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: shortener
+        component: migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          # The build-stage image: the Prisma CLI is a devDependency and is
+          # deliberately absent from the runtime image.
+          image: url-shortener-migrate:local
+          command: ["npx", "prisma", "migrate", "deploy"]
+          envFrom:
+            - secretRef:
+                name: shortener-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi

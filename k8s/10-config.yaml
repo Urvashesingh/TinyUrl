@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shortener-config
+  namespace: shortener
+data:
+  # Non-secret configuration. Anything here is visible to anyone who can read
+  # the namespace, which is exactly why the salt and the passwords are not.
+  REDIS_URL: "redis://redis:6379"
+  KAFKA_BROKERS: "kafka:9092"
+  EVENT_TRANSPORT: "kafka"
+  LOG_LEVEL: "info"
+  PORT: "3000"
+  # Behind an ingress, so the scheme and host come from X-Forwarded-* headers.
+  TRUST_PROXY: "true"
+  BASE_URL: "https://sho.rt"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shortener-secrets
+  namespace: shortener
+type: Opaque
+stringData:
+  # Placeholders. In a real cluster these come from a sealed secret, an
+  # external secrets operator, or the cloud provider's secret manager -- not
+  # from a file in the repository.
+  DATABASE_URL: "postgresql://shortener:CHANGEME@postgres:5432/shortener?schema=public"
+  DATABASE_REPLICA_URL: "postgresql://shortener:CHANGEME@postgres-replica:5432/shortener?schema=public"
+  IP_HASH_SALT: "CHANGEME-a-long-random-value"

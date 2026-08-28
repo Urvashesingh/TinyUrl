@@ -1,8 +1,8 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 through 8 are
-complete and tested.**
+distributed-systems machinery and the reasoning behind it. **Phases 0 through 8 are complete
+and tested; 9 and 10 are written but not cluster-tested.**
 
 - Node 22 · TypeScript (strict) · Express
 - PostgreSQL via Prisma
@@ -667,6 +667,82 @@ consumer, Postgres, and the trending board all agreeing on seven clicks.
 
 ---
 
+## Phases 9 and 10 — Kubernetes and autoscaling
+
+```bash
+npm run k8s:render      # kustomize build
+npm run k8s:validate    # strict schema validation, offline
+```
+
+> **Verification status, stated plainly.** There is no cluster in this
+> environment — minikube and kind are not installed and `kubectl` has no
+> context. These manifests are **schema-validated, not cluster-tested**: all 11
+> rendered resources pass `kubeconform -strict` against Kubernetes 1.30, and
+> `kustomize build` renders cleanly. That catches typos, wrong API versions and
+> misspelled fields. It does **not** prove the pods schedule, the probes pass,
+> or the HPA scales. Everything below is reasoning, not a measurement, and it
+> is the one part of this project that has not been run.
+
+### The probe split, again
+
+The liveness/readiness distinction from Phase 0 is what these manifests exist
+to exploit. Liveness hits `/health` and never touches Postgres: if it did, a
+database blip would fail every pod's liveness probe simultaneously and
+Kubernetes would restart the entire fleet, turning a recoverable outage into a
+crash loop. Readiness hits `/ready`, so a pod that cannot serve leaves the
+Service without being killed.
+
+A `startupProbe` covers slow starts separately, because otherwise a cold start
+longer than the liveness threshold is an infinite restart loop.
+
+### Shutdown is a race, and `preStop` is the fix
+
+Removing a pod from the endpoints list and sending it SIGTERM happen
+concurrently, and proxies learn about the removal asynchronously. Without the
+five-second `preStop` sleep, a pod can stop accepting connections before every
+proxy knows it is going — which is what deploy-time 502s usually are. The grace
+period is 30s against the app's own 10s drain, so a slow drain finishes instead
+of being SIGKILLed halfway.
+
+### The consumer does not autoscale, and that is the point
+
+A Kafka partition is consumed by at most one member of a consumer group. With
+three partitions, a fourth consumer replica does nothing but join the group,
+sit idle, and force a rebalance whenever it starts or stops. Its ceiling is a
+property of the topic, not of load — and raising it means repartitioning, which
+rehashes keys and breaks the per-link ordering Phase 4 established.
+
+So the consumer is a fixed two replicas with no HPA. It also has no probes: it
+listens on nothing, and a fake HTTP endpoint added to satisfy a probe would
+report healthy while the consumer sat wedged. A real liveness signal here is
+consumer-group membership or lag.
+
+### HPA choices
+
+- **CPU at 70% of request.** Utilisation is a percentage of the *request*, so
+  an unset request means no CPU-based autoscaling at all — that is why the
+  requests are set deliberately rather than as boilerplate.
+- **No CPU limit.** A CPU limit throttles a Node event loop in ways that look
+  exactly like a slow dependency; the request already guarantees a floor.
+- **`maxReplicas: 12`.** The API is stateless and would scale further, but each
+  replica opens Postgres and Redis connections, so the real ceiling is the
+  database connection limit. Past this the answer is PgBouncer, not more pods.
+- **Scale up instantly, scale down over five minutes.** An overloaded redirect
+  service is a down redirect service. Flapping costs more in cold caches and
+  connection churn than idle pods save.
+
+A `PodDisruptionBudget` keeps 2 of 3 replicas during node drains and upgrades,
+which are otherwise free to evict everything at once.
+
+### Migrations and partitions
+
+Migrations run as a `Job` from the build-stage image, since the Prisma CLI is a
+devDependency absent from the runtime image. Partition maintenance is a monthly
+`CronJob` — provisioning ahead is what keeps the Phase 7 default partition
+empty, and a non-empty default makes creating that month's partition fail.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -681,6 +757,8 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
   at-least-once with no dedup key.
 - **Single instance.** No connection-pool tuning.
 - **The multiplier is not secret**, as discussed above.
+- **The Kubernetes manifests have never run on a cluster.** No cluster was
+  available; they are schema-valid and no more than that.
 - **`npm audit` reports 3 high advisories** in `deepmerge-ts`, reached only
   through the `prisma` CLI devDependency. No patched version is in range and it
   is not runtime code, so it is tracked rather than force-upgraded.
@@ -696,8 +774,8 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 6** — Postgres read replica + read/write split
 - [x] **Phase 7** — Partition the click-events table
 - [x] **Phase 8** — Dockerize all services + compose
-- [ ] **Phase 9** — Kubernetes (minikube)
-- [ ] **Phase 10** — Horizontal Pod Autoscaler
+- [x] **Phase 9** — Kubernetes manifests *(schema-validated, not cluster-tested)*
+- [x] **Phase 10** — Horizontal Pod Autoscaler *(schema-validated, not cluster-tested)*
 - [ ] **Phase 11** — Load test with k6 until it breaks
 - [ ] **Phase 12** — Prometheus + Grafana + structured logs
 - [ ] **Phase 13** — CI/CD with GitHub Actions

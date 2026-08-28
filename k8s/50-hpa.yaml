@@ -1,0 +1,52 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shortener-api
+  namespace: shortener
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shortener-api
+  minReplicas: 3
+  # Deliberately bounded. The API is stateless and scales freely, but every
+  # replica opens Postgres and Redis connections, so the real ceiling is the
+  # database's connection limit rather than anything about the pods. Past this
+  # point the answer is a connection pooler (PgBouncer), not more replicas.
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Percentage of the *request*, not of the node. 70 leaves headroom
+          # for the delay between a spike starting and new pods being ready.
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      # React fast: a redirect service that is overloaded is a service that is
+      # down, and pods take time to become ready.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Scale down slowly. Traffic is bursty, and flapping costs more in
+      # cold caches and Postgres connection churn than the idle pods save.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
