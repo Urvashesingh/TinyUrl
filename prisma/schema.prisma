@@ -1,0 +1,21 @@
+// Prisma schema. The datasource + generator are set up for you.
+// The DATA MODEL is your first learning task — see README "Phase 0".
+// Do NOT fill this in yet; we design it together.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Link {
+  id        BigInt   @id @default(autoincrement())
+  code      String   @unique
+  longUrl   String
+  createdAt DateTime @default(now())
+
+  @@map("links")
+}

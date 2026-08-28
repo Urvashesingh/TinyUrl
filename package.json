@@ -1,0 +1,31 @@
+{
+  "name": "url-shortener",
+  "version": "0.1.0",
+  "description": "URL shortener with real-time analytics — a phase-by-phase learning project",
+  "type": "module",
+  "scripts": {
+    "postinstall": "prisma generate",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "node --import tsx --test test/base62.test.ts test/codes.test.ts",
+    "test:integration": "node --import tsx --test test/api.test.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.2.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.5",
+    "prisma": "^6.2.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
