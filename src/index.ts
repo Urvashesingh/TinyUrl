@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { createApp } from "./app.js";
 import { createLinkCache } from "./cache.js";
+import { createRedisEventPublisher } from "./events.js";
 import { closeRedis, createRedis } from "./redis.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
@@ -9,7 +10,17 @@ const prisma = new PrismaClient();
 const redis = createRedis("api");
 const cache = createLinkCache(redis);
 
-const server = createApp({ prisma, cache, redis }).listen(config.port, () => {
+let droppedEvents = 0;
+const events = createRedisEventPublisher(redis, () => {
+  droppedEvents += 1;
+  // Rate-limited by nature: only logged on powers of ten, because a Redis
+  // outage would otherwise produce one line per redirect.
+  if (Number.isInteger(Math.log10(droppedEvents))) {
+    logger.warn({ droppedEvents }, "click events dropped, analytics are lossy");
+  }
+});
+
+const server = createApp({ prisma, cache, redis, events }).listen(config.port, () => {
   logger.info({ port: config.port }, "listening");
 });
 

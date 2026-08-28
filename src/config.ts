@@ -69,6 +69,19 @@ export const config = {
    * than to ration real traffic. It sits far above anything a human browsing
    * links could produce.
    */
+  /**
+   * Salt for hashing visitor IPs before storage. An unsalted hash of an IPv4
+   * address is trivially reversible -- the whole space is 2^32 -- so this must
+   * be set to something secret in production.
+   */
+  ipHashSalt: process.env.IP_HASH_SALT ?? "local-development-salt",
+
+  /** Analytics batching: flush on whichever trigger fires first. */
+  clickBatch: {
+    maxSize: readInteger("CLICK_BATCH_SIZE", 100),
+    maxDelayMs: readInteger("CLICK_BATCH_DELAY_MS", 500),
+  },
+
   redirectRateLimit: {
     limit: readInteger("REDIRECT_RATE_LIMIT", 600),
     windowSeconds: readInteger("REDIRECT_RATE_WINDOW_SECONDS", 60),

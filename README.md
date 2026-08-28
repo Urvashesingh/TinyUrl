@@ -1,7 +1,7 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 through 2 are
+distributed-systems machinery and the reasoning behind it. **Phases 0 through 3 are
 complete and tested.**
 
 - Node 22 · TypeScript (strict) · Express
@@ -9,7 +9,7 @@ complete and tested.**
 - Redis for cache-aside reads and sliding-window rate limiting
 - Structured JSON logging via pino, with per-request correlation ids
 - Docker Compose for local infrastructure
-- 58 tests on `node:test`, no test framework dependency
+- 78 tests on `node:test`, no test framework dependency
 
 ## Quick start
 
@@ -38,6 +38,7 @@ suite drives a real HTTP server against both and cleans up what it creates.
 | `GET`  | `/health` | Liveness. Always `200` while the process is up; never touches Postgres. |
 | `GET`  | `/ready`  | Readiness. `200` when Postgres answers, `503` when it does not. Redis being down does **not** fail this. |
 | `POST` | `/links`  | `201` with the created link. `400` on an invalid `longUrl`, `413` on an oversized body. |
+| `GET`  | `/links/:code/stats` | Click count and unique visitors for one link. |
 | `GET`  | `/:code`  | `302` to the stored URL with `Cache-Control: no-store`. `404` if unknown. |
 
 ```bash
@@ -327,6 +328,58 @@ as the outer bound.
 
 ---
 
+## Phase 3 — click events over Redis pub/sub
+
+### The redirect never waits on analytics
+
+`publishClick` returns `void`, not a promise. That is deliberate: a signature
+that returns a promise invites a caller to await it, and the moment a redirect
+awaits analytics, an analytics problem becomes a user-facing latency problem.
+The publish is fired and forgotten, and its failure path is a counter, not an
+exception.
+
+### A separate consumer process
+
+The consumer subscribes, buffers, and writes batches to Postgres. It runs as
+its own process because the two halves have opposite requirements: the API is
+latency-critical and scales with request volume, the consumer is
+throughput-oriented and scales with event volume. Sharing a process lets a slow
+batch insert compete with a redirect for the same event loop.
+
+Batching is triggered by size *or* by time, because either alone is wrong:
+size-only strands the last few events when traffic goes quiet, time-only gives
+up throughput under load. Flushes are serialised so two cannot interleave, and
+a failed batch is logged and dropped rather than retried in place — retrying
+would grow the buffer without bound during an outage, trading lost analytics
+for a dead process.
+
+### Addresses are hashed, never stored
+
+`ipHash` is a salted SHA-256 truncated to 32 characters. The salt matters: an
+*unsalted* hash of an IPv4 address is trivially reversible, because the entire
+space is only 2^32 and fits in a rainbow table. Salted, it is enough to count
+unique visitors and not enough to identify one.
+
+### This phase loses data, on purpose
+
+Redis pub/sub is at-most-once and has no storage. If no subscriber is connected
+the message is dropped on the floor — no queue, no replay, no acknowledgement.
+
+Demonstrated rather than assumed: with the consumer stopped, four redirects
+were served successfully and all four clicks were lost permanently.
+
+```
+consumer down -> 4 redirects served (302, 302, 302, 302)
+clicks recorded: 5   (unchanged -- the 4 are gone for good)
+```
+
+That means every deploy of the consumer silently drops whatever arrives during
+the restart. It is an acceptable trade for a view counter and completely
+unacceptable for anything that bills or audits — which is the entire argument
+for Phase 4.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -348,7 +401,7 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 0** — Core API: create short link + redirect
 - [x] **Phase 1** — Redis cache (cache-aside) + structured logging
 - [x] **Phase 2** — Rate limiter (Redis)
-- [ ] **Phase 3** — Redirect events via Redis pub/sub
+- [x] **Phase 3** — Redirect events via Redis pub/sub
 - [ ] **Phase 4** — Swap pub/sub for Kafka/RabbitMQ
 - [ ] **Phase 5** — Live trending leaderboard (WebSockets + Redis sorted sets)
 - [ ] **Phase 6** — Postgres read replica + read/write split

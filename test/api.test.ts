@@ -6,6 +6,7 @@ import { PrismaClient } from "@prisma/client";
 import { createApp } from "../src/app.js";
 import { createLinkCache, type LinkCache } from "../src/cache.js";
 import { closeRedis, createRedis } from "../src/redis.js";
+import { CLICK_CHANNEL, createRedisEventPublisher, parseClickEvent } from "../src/events.js";
 import type Redis from "ioredis";
 import { encodeId } from "../src/codes.js";
 import { logger } from "../src/logger.js";
@@ -60,7 +61,12 @@ before(async () => {
   }
 
   cache = createLinkCache(redis);
-  server = createApp({ prisma, cache, redis }).listen(0);
+  server = createApp({
+    prisma,
+    cache,
+    redis,
+    events: createRedisEventPublisher(redis),
+  }).listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -77,6 +83,7 @@ beforeEach(async () => {
 });
 
 after(async () => {
+  await prisma.clickEvent.deleteMany({ where: { code: { in: createdCodes } } });
   await prisma.link.deleteMany({ where: { code: { in: createdCodes } } });
   await new Promise((resolve) => server.close(resolve));
   await Promise.allSettled([prisma.$disconnect(), closeRedis(redis), admin.quit()]);
@@ -272,5 +279,58 @@ describe("rate limiting", () => {
     }
 
     assert.equal((await api(`/${code}`)).status, 302);
+  });
+});
+
+describe("click events", () => {
+  it("publishes an event for every redirect served", async () => {
+    const { default: Redis } = await import("ioredis");
+    const listener = new Redis(config.redisUrl);
+
+    const received = new Promise<string>((resolve) => {
+      listener.on("message", (_channel, payload) => resolve(payload));
+    });
+    await listener.subscribe(CLICK_CHANNEL);
+
+    const { code } = (await (await createLink("https://example.com/tracked")).json()) as {
+      code: string;
+    };
+    await api(`/${code}`, { headers: { "User-Agent": "test-agent", Referer: "https://ref.example" } });
+
+    const event = parseClickEvent(await received);
+    await listener.quit();
+
+    assert.ok(event, "published payload must parse as a click event");
+    assert.equal(event.code, code);
+    assert.equal(event.userAgent, "test-agent");
+    assert.equal(event.referer, "https://ref.example");
+    assert.ok(event.ipHash, "the visitor address must be hashed, never stored raw");
+    assert.ok(!event.ipHash.includes("127.0.0.1") && !event.ipHash.includes("::1"));
+  });
+
+  it("serves the redirect even when nothing is listening for events", async () => {
+    // Pub/sub with no subscriber silently drops the message. The redirect
+    // must be completely indifferent to that.
+    const { code } = (await (await createLink("https://example.com/unwatched")).json()) as {
+      code: string;
+    };
+
+    const response = await api(`/${code}`);
+    assert.equal(response.status, 302);
+  });
+
+  it("reports zero clicks for a link nobody has followed", async () => {
+    const { code } = (await (await createLink("https://example.com/unclicked")).json()) as {
+      code: string;
+    };
+
+    const stats = (await (await api(`/links/${code}/stats`)).json()) as Record<string, number>;
+    assert.equal(stats.clicks, 0);
+    assert.equal(stats.uniqueVisitors, 0);
+  });
+
+  it("404s stats for a code that was never issued", async () => {
+    assert.equal((await api("/links/notacode/stats")).status, 404);
+    assert.equal((await api(`/links/${encodeId(2_999_999_999_999n)}/stats`)).status, 404);
   });
 });

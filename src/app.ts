@@ -9,6 +9,7 @@ import { decodeCode, encodeId } from "./codes.js";
 import type { LinkCache } from "./cache.js";
 import { createLinkResolver } from "./links.js";
 import { createRateLimiter } from "./rateLimit.js";
+import { hashIp, type EventPublisher } from "./events.js";
 
 type UrlRejection = "missing" | "malformed" | "unsupported_scheme" | "too_long";
 
@@ -53,10 +54,11 @@ export interface AppDeps {
   prisma: PrismaClient;
   cache: LinkCache;
   redis: Redis;
+  events: EventPublisher;
 }
 
 export function createApp(deps: AppDeps): Express {
-  const { prisma, cache, redis } = deps;
+  const { prisma, cache, redis, events } = deps;
   const app = express();
   const resolveLink = createLinkResolver(prisma, cache);
 
@@ -156,6 +158,36 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
+  // Two path segments, so this cannot be shadowed by the single-segment
+  // catch-all below -- but it still has to be declared first to be safe.
+  app.get("/links/:code/stats", async (req, res, next) => {
+    try {
+      const { code } = req.params;
+      if (decodeCode(code) === null) {
+        return res.status(404).json({ error: "Short link not found." });
+      }
+
+      const link = await prisma.link.findUnique({ where: { code }, select: { createdAt: true } });
+      if (!link) {
+        return res.status(404).json({ error: "Short link not found." });
+      }
+
+      const [totals] = await prisma.$queryRaw<Array<{ clicks: bigint; visitors: bigint }>>`
+        SELECT count(*) AS clicks, count(DISTINCT "ipHash") AS visitors
+        FROM click_events WHERE code = ${code}
+      `;
+
+      return res.json({
+        code,
+        createdAt: link.createdAt.toISOString(),
+        clicks: Number(totals?.clicks ?? 0),
+        uniqueVisitors: Number(totals?.visitors ?? 0),
+      });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
   // Must stay below every other route: it matches any single path segment.
   app.get("/:code", limitRedirects, async (req, res, next) => {
     try {
@@ -173,6 +205,17 @@ export function createApp(deps: AppDeps): Express {
       if (longUrl === null) {
         return res.status(404).json({ error: "Short link not found." });
       }
+
+      // Fire and forget. The redirect is what the user is waiting for; the
+      // analytics event must never add latency to it, and must never be able
+      // to fail it.
+      events.publishClick({
+        code,
+        occurredAt: new Date().toISOString(),
+        userAgent: req.get("user-agent"),
+        referer: req.get("referer"),
+        ipHash: hashIp(req.ip),
+      });
 
       // Every redirect is a click we want to count later, so no intermediary
       // gets to serve it for us.
