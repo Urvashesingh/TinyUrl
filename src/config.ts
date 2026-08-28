@@ -101,6 +101,13 @@ export const config = {
     partitions: readInteger("CLICK_TOPIC_PARTITIONS", 3),
   },
 
+  partitions: {
+    /** How far ahead to keep click_events partitions provisioned. */
+    provisionMonthsAhead: readInteger("PARTITION_MONTHS_AHEAD", 3),
+    /** Partitions older than this are dropped outright. */
+    retentionMonths: readInteger("CLICK_RETENTION_MONTHS", 12),
+  },
+
   trending: {
     /** Length of the sliding window, in one-minute buckets. */
     windowMinutes: readInteger("TRENDING_WINDOW_MINUTES", 10),

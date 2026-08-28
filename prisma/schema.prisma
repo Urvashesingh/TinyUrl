@@ -19,7 +19,7 @@ model Link {
 /// One row per redirect served. Written by the analytics consumer, never by
 /// the request path -- a redirect must not wait on analytics.
 model ClickEvent {
-  id         BigInt   @id @default(autoincrement())
+  id         BigInt   @default(autoincrement())
   code       String
   occurredAt DateTime
   userAgent  String?
@@ -28,6 +28,10 @@ model ClickEvent {
   /// not enough to identify one.
   ipHash     String?
 
+  /// Postgres requires the partition key to appear in every unique constraint,
+  /// so the primary key is (id, occurredAt) rather than id alone. That is the
+  /// constraint that shapes the whole design -- see the Phase 7 notes.
+  @@id([id, occurredAt])
   @@index([code, occurredAt])
   @@index([occurredAt])
   @@map("click_events")

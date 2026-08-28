@@ -11,12 +11,13 @@
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "node --import tsx --test test/base62.test.ts test/codes.test.ts test/links.test.ts test/batch.test.ts test/events.test.ts",
-    "test:integration": "node --import tsx --test test/cache.test.ts test/rateLimit.test.ts test/trending.test.ts test/liveFeed.test.ts test/kafka.test.ts test/api.test.ts",
+    "test:integration": "node --import tsx --test test/cache.test.ts test/rateLimit.test.ts test/trending.test.ts test/liveFeed.test.ts test/partitions.test.ts test/kafka.test.ts test/api.test.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "dev:consumer": "tsx watch src/consumer.ts",
-    "start:consumer": "node dist/consumer.js"
+    "start:consumer": "node dist/consumer.js",
+    "partitions": "tsx scripts/partitions.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.2.1",

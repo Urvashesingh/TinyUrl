@@ -1,7 +1,7 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 through 6 are
+distributed-systems machinery and the reasoning behind it. **Phases 0 through 7 are
 complete and tested.**
 
 - Node 22 · TypeScript (strict) · Express
@@ -10,7 +10,7 @@ complete and tested.**
 - Structured JSON logging via pino, with per-request correlation ids
 - Kafka (KRaft) for the durable click-event log
 - Docker Compose for local infrastructure
-- 101 tests on `node:test`, no test framework dependency
+- 108 tests on `node:test`, no test framework dependency
 
 ## Quick start
 
@@ -553,6 +553,63 @@ REPLICATION attribute, scram-sha-256, and a narrower source range.
 
 ---
 
+## Phase 7 — partitioning the click-events table
+
+`click_events` is the only table that grows without bound: one row per
+redirect, forever. It is now RANGE-partitioned by `occurredAt`, one partition
+per month.
+
+### What partitioning actually buys
+
+| | Before | After |
+| --- | --- | --- |
+| Deleting old data | `DELETE` writes as much WAL as the rows it removes and leaves bloat for VACUUM | `DROP TABLE` on one partition: instant, disk returned immediately |
+| "Last 7 days" | Index scan over all history | Only the partitions in range are touched |
+| VACUUM / ANALYZE / REINDEX | One enormous relation | Per partition |
+
+Retention is the big one. On a table with a billion rows, `DELETE FROM
+click_events WHERE occurredAt < ...` is an outage waiting to happen. Dropping a
+partition is a catalogue update.
+
+Pruning is asserted with `EXPLAIN` in the tests rather than assumed: a query
+bounded to September must name the September partition and must not mention
+July or November.
+
+### The constraint that shapes the design
+
+Postgres requires the partition key to appear in every unique constraint. So
+the primary key had to become `(id, "occurredAt")` rather than `id`. That is
+not a detail — it is the thing to know before choosing to partition, because it
+propagates into every foreign key that would ever point at this table.
+
+### The default partition, and its trap
+
+There is a `DEFAULT` partition, so a row outside every declared range is stored
+rather than rejected. Losing a click to a missing partition would be worse than
+the trade being made.
+
+The trap: while the default holds rows for a month, creating *that month's*
+partition requires scanning the default and **fails** if any row conflicts. So
+the default is a safety net, not a working part — `npm run partitions`
+provisions three months ahead specifically to keep it empty, and prunes past
+the retention horizon in the same pass. It detaches before dropping, so a
+long-running query on a partition cannot drag an ACCESS EXCLUSIVE lock onto the
+parent.
+
+### Migration notes
+
+Renaming a table renames neither its sequence nor its indexes, and index names
+are unique per schema — so the sequence, the primary key, and both indexes all
+had to be moved aside before the new table could claim those names. That is the
+kind of thing that only shows up when you run the migration, which is why it
+was run against a real database rather than reasoned about.
+
+Indexes are declared on the parent, so every current and future partition gets
+them automatically. Without that, each new month would quietly start life
+unindexed.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -580,7 +637,7 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 4** — Swap pub/sub for Kafka/RabbitMQ
 - [x] **Phase 5** — Live trending leaderboard (WebSockets + Redis sorted sets)
 - [x] **Phase 6** — Postgres read replica + read/write split
-- [ ] **Phase 7** — Partition the click-events table
+- [x] **Phase 7** — Partition the click-events table
 - [ ] **Phase 8** — Dockerize all services + compose
 - [ ] **Phase 9** — Kubernetes (minikube)
 - [ ] **Phase 10** — Horizontal Pod Autoscaler
