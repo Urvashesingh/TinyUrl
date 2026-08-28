@@ -11,6 +11,12 @@ import { createLinkResolver, type Databases } from "./links.js";
 import { createRateLimiter } from "./rateLimit.js";
 import { hashIp, type EventPublisher } from "./events.js";
 import { readTrending, type TrendingEntry } from "./trending.js";
+import {
+  linksCreated,
+  metricsHandler,
+  metricsMiddleware,
+  redirectCacheOutcomes,
+} from "./metrics.js";
 
 type UrlRejection = "missing" | "malformed" | "unsupported_scheme" | "too_long";
 
@@ -110,7 +116,13 @@ export function createApp(deps: AppDeps): Express {
     }),
   );
 
+  app.use(metricsMiddleware());
   app.use(express.json({ limit: config.jsonBodyLimit }));
+
+  // Deliberately above the rate limiters and outside the click path: a scrape
+  // is not user traffic. In Kubernetes this is reached through the pod IP, not
+  // through the ingress, so it is not publicly exposed.
+  app.get("/metrics", metricsHandler);
 
   // Liveness: is the process up? Deliberately does not touch the database, so
   // a database blip does not get the container killed and restarted.
@@ -179,6 +191,7 @@ export function createApp(deps: AppDeps): Express {
       // read-your-writes, without a synchronous replica or a primary read.
       await cache.remember(link.code, link.longUrl);
 
+      linksCreated.inc();
       req.log.info({ code: link.code }, "link created");
 
       return res.status(201).json({
@@ -245,6 +258,7 @@ export function createApp(deps: AppDeps): Express {
       }
 
       const { longUrl, cache: outcome } = await resolveLink(code);
+      redirectCacheOutcomes.inc({ outcome });
       req.log.info({ code, cache: outcome, found: longUrl !== null }, "redirect resolved");
 
       if (longUrl === null) {

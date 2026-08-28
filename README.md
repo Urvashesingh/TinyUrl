@@ -813,6 +813,68 @@ figures would need a separate load-generating host to defend.
 
 ---
 
+## Phase 12 — Prometheus, Grafana, and alerts
+
+```bash
+docker compose --profile app up -d
+# Grafana    http://localhost:3001   (dashboard auto-provisioned)
+# Prometheus http://localhost:9090
+```
+
+### The one line that matters most
+
+```ts
+function routeLabel(req: Request): string { ... }   // "/:code", never "/0EjtcvP"
+```
+
+Labelling a metric with the request path would mint a new time series per short
+link. A million links means a million series, which is how people take down
+their own Prometheus. The label is the *route pattern*. There is a test
+asserting the code never appears as a label value, and the live label set is
+exactly `["/:code", "/health", "/links"]`.
+
+### Metrics chosen from what the load test found
+
+Phase 11 established that the bottleneck is a single saturated core, so the
+instrumentation is built around detecting that rather than around whatever a
+library exports by default:
+
+| Metric | Why |
+| --- | --- |
+| `nodejs_eventloop_lag_seconds` | The direct symptom of a CPU-bound Node process. Rises *before* latency does. |
+| `http_request_duration_seconds` | Histogram bucketed around the 200ms SLO, not around library defaults, so it has resolution where decisions are made |
+| `redirect_cache_outcomes_total` | hit / miss / coalesced. A falling hit rate means Postgres is taking read traffic the cache exists to absorb |
+| `rate_limit_rejections_total` | Distinguishes "we are being attacked" from "we are broken" |
+| `click_events_dropped_total` | Analytics loss, which is invisible from the redirect path by design |
+
+### Alerts
+
+Five rules, and the primary one is latency rather than errors — because Phase
+11 measured that this service *queues* rather than failing. Error rate stayed
+at 0.00% while p99 blew out to tens of seconds. An alert on errors alone would
+have stayed silent through the entire overload.
+
+`EventLoopLagHigh` carries the remedy in its annotation: Node is
+single-threaded, so add replicas rather than a bigger machine.
+
+### Verified
+
+Not just "the config exists":
+
+- Prometheus discovers all three API replicas via DNS service discovery, so
+  `--scale api=3` is picked up automatically — a static target would scrape one
+  replica and silently miss the rest. All targets `up`.
+- All five alert rules load (`promtool check rules`, and the live rules API).
+- Grafana provisions the datasource and the eight-panel dashboard on startup.
+- Under a 300 req/s run: 11,802 cache hits, 11,854 redirects, p95 21.6 ms,
+  event loop lag ~3 ms across three instances.
+
+Grafana runs with anonymous admin and no login form. That is a local-development
+convenience and is called out here because it is exactly the kind of thing that
+should never reach a real deployment.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -822,7 +884,6 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - **No auth.** Links are anonymous and permanent; there is no way to list, edit,
   revoke, or expire one.
 - **Single-flight is per-process**, as discussed above.
-- **No cache metrics.** Hit rate is greppable from logs, not measurable. Phase 12.
 - **Click counts can over-count** after a consumer crash, because delivery is
   at-least-once with no dedup key.
 - **Single instance.** No connection-pool tuning.
@@ -847,5 +908,5 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 9** — Kubernetes manifests *(schema-validated, not cluster-tested)*
 - [x] **Phase 10** — Horizontal Pod Autoscaler *(schema-validated, not cluster-tested)*
 - [x] **Phase 11** — Load test with k6 until it breaks
-- [ ] **Phase 12** — Prometheus + Grafana + structured logs
+- [x] **Phase 12** — Prometheus + Grafana + structured logs
 - [ ] **Phase 13** — CI/CD with GitHub Actions

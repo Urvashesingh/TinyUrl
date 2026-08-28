@@ -1,0 +1,59 @@
+groups:
+  - name: shortener
+    rules:
+      # Phase 11 showed the service queues rather than failing: latency
+      # degrades long before errors appear. So latency is the primary alert,
+      # and it is written on the same p95 the load test used as its SLO.
+      - alert: RedirectLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{route="/:code"}[5m]))
+          ) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redirect p95 above 200ms for 5 minutes"
+          description: "Load testing put a single replica's ceiling near 400 req/s; check replica count and event loop lag."
+
+      - alert: ErrorRateHigh
+        expr: |
+          sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m]))
+            / sum(rate(http_request_duration_seconds_count[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 1% of requests are failing"
+
+      # The direct symptom of the bottleneck Phase 11 identified. A saturated
+      # single-threaded process shows up here before it shows up as latency.
+      - alert: EventLoopLagHigh
+        expr: shortener_node_nodejs_eventloop_lag_seconds > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event loop lag above 100ms"
+          description: "The process is CPU-bound. Node is single-threaded: add replicas rather than a bigger machine."
+
+      # Not an outage, but it means the database is taking read traffic the
+      # cache was built to absorb, and the redirect path is about to get slow.
+      - alert: CacheHitRateLow
+        expr: |
+          sum(rate(redirect_cache_outcomes_total{outcome="hit"}[10m]))
+            / sum(rate(redirect_cache_outcomes_total[10m])) < 0.7
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redirect cache hit rate below 70%"
+
+      - alert: ClickEventsDropping
+        expr: rate(click_events_dropped_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Click events are being dropped"
+          description: "Analytics are lossy right now; the redirect path is unaffected by design."

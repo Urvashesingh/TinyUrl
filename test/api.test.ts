@@ -404,3 +404,52 @@ describe("read/write split", () => {
     );
   });
 });
+
+describe("metrics", () => {
+  it("exposes a Prometheus exposition endpoint", async () => {
+    const response = await api("/metrics");
+    const body = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/plain/);
+    assert.match(body, /# HELP http_request_duration_seconds/);
+    assert.match(body, /# TYPE http_request_duration_seconds histogram/);
+  });
+
+  it("labels requests with the route pattern, never the short code", async () => {
+    // The cardinality trap: labelling with the actual path would mint a new
+    // time series per short link. A million links would be a million series,
+    // which is how people take down their own Prometheus.
+    const { code } = (await (await createLink("https://example.com/metrics-label")).json()) as {
+      code: string;
+    };
+    await api(`/${code}`);
+
+    const body = await (await api("/metrics")).text();
+
+    assert.match(body, /route="\/:code"/);
+    assert.ok(!body.includes(`route="/${code}"`), "the code must never appear as a label value");
+  });
+
+  it("counts redirect cache outcomes", async () => {
+    const { code } = (await (await createLink("https://example.com/metrics-cache")).json()) as {
+      code: string;
+    };
+    await api(`/${code}`);
+
+    const body = await (await api("/metrics")).text();
+    assert.match(body, /redirect_cache_outcomes_total\{outcome="(hit|miss|coalesced)"\}/);
+  });
+
+  it("exposes event loop lag, the symptom of the known bottleneck", async () => {
+    const body = await (await api("/metrics")).text();
+    assert.match(body, /shortener_node_nodejs_eventloop_lag_seconds/);
+  });
+
+  it("does not measure the metrics endpoint itself", async () => {
+    await api("/metrics");
+    const body = await (await api("/metrics")).text();
+
+    assert.ok(!body.includes('route="/metrics"'), "scraping must not appear as traffic");
+  });
+});

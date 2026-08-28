@@ -7,6 +7,7 @@ import { closeRedis, createRedis } from "./redis.js";
 import { attachLiveFeed } from "./liveFeed.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
+import { clickEventsDropped } from "./metrics.js";
 
 const prisma = new PrismaClient();
 
@@ -25,6 +26,7 @@ const cache = createLinkCache(redis);
 let droppedEvents = 0;
 function noteDroppedEvent(): void {
   droppedEvents += 1;
+  clickEventsDropped.inc();
   // Only logged on powers of ten: an outage would otherwise produce one line
   // per redirect and bury everything else.
   if (Number.isInteger(Math.log10(droppedEvents))) {

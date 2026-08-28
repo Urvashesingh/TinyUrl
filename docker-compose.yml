@@ -203,7 +203,46 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # --- observability (Phase 12) -----------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: shortener-prometheus
+    profiles: ["app"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: shortener-grafana
+    profiles: ["app"]
+    restart: unless-stopped
+    environment:
+      # Local only. Anonymous admin exists so the dashboard opens without a
+      # login prompt while developing; a real deployment does neither.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   postgres-data:
   postgres-replica-data:
   kafka-data:
+  prometheus-data:
+  grafana-data:

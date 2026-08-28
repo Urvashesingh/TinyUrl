@@ -1,5 +1,6 @@
 import type { Request, RequestHandler, Response } from "express";
 import type Redis from "ioredis";
+import { rateLimitRejections } from "./metrics.js";
 
 /**
  * Sliding-window-log rate limiter.
@@ -108,6 +109,7 @@ export function createRateLimiter(redis: Redis, options: RateLimitOptions): Requ
       return next();
     }
 
+    rateLimitRejections.inc({ limiter: options.name });
     req.log?.warn({ limiter: options.name, key }, "rate limit exceeded");
     return res.status(429).json({
       error: "Too many requests. Slow down and try again shortly.",
