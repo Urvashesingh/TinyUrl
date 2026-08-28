@@ -9,6 +9,16 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 
 const prisma = new PrismaClient();
+
+/**
+ * Reads go to the replica when one is configured. Falling back to the same
+ * client keeps single-node deployments working with no code path of their own.
+ */
+const replica = config.databaseReplicaUrl
+  ? new PrismaClient({ datasourceUrl: config.databaseReplicaUrl })
+  : prisma;
+
+const db = { write: prisma, read: replica };
 const redis = createRedis("api");
 const cache = createLinkCache(redis);
 
@@ -41,7 +51,7 @@ if (config.eventTransport === "kafka") {
 let liveFeed: ReturnType<typeof attachLiveFeed> | null = null;
 
 const app = createApp({
-  prisma,
+  db,
   cache,
   redis,
   events,
@@ -49,7 +59,10 @@ const app = createApp({
 });
 
 const server = app.listen(config.port, () => {
-  logger.info({ port: config.port, transport: config.eventTransport }, "listening");
+  logger.info(
+    { port: config.port, transport: config.eventTransport, replica: replica !== prisma },
+    "listening",
+  );
 });
 
 liveFeed = attachLiveFeed(server, redis);
@@ -80,7 +93,12 @@ async function shutdown(signal: string): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
   // Flush buffered producer batches before the socket closes, or the last
   // events of a deploy are lost for no reason.
-  await Promise.allSettled([closeEvents(), prisma.$disconnect(), closeRedis(redis)]);
+  await Promise.allSettled([
+    closeEvents(),
+    prisma.$disconnect(),
+    replica === prisma ? Promise.resolve() : replica.$disconnect(),
+    closeRedis(redis),
+  ]);
   process.exit(0);
 }
 

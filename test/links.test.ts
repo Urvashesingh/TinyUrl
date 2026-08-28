@@ -36,6 +36,11 @@ function fakePrisma(rows: Record<string, string>, delayMs = 0): FakePrisma {
   } as FakePrisma;
 }
 
+/** A single-node deployment: reads and writes hit the same client. */
+function sameNode(client: PrismaClient) {
+  return { read: client, write: client };
+}
+
 function fakeCache(seed: Record<string, CacheLookup> = {}) {
   const entries = new Map<string, CacheLookup>(Object.entries(seed));
   const writes: Array<{ code: string; longUrl: string | null }> = [];
@@ -65,7 +70,7 @@ describe("createLinkResolver", () => {
     const prisma = fakePrisma({ abc: "https://example.com/from-db" });
     const { cache } = fakeCache({ abc: { state: "hit", longUrl: "https://example.com/cached" } });
 
-    const result = await createLinkResolver(prisma.client, cache)("abc");
+    const result = await createLinkResolver(sameNode(prisma.client), cache)("abc");
 
     assert.deepEqual(result, { longUrl: "https://example.com/cached", cache: "hit" });
     assert.equal(prisma.reads, 0);
@@ -74,7 +79,7 @@ describe("createLinkResolver", () => {
   it("reads through on a miss and populates the cache", async () => {
     const prisma = fakePrisma({ abc: "https://example.com/target" });
     const { cache, writes } = fakeCache();
-    const resolve = createLinkResolver(prisma.client, cache);
+    const resolve = createLinkResolver(sameNode(prisma.client), cache);
 
     const first = await resolve("abc");
     assert.deepEqual(first, { longUrl: "https://example.com/target", cache: "miss" });
@@ -90,7 +95,7 @@ describe("createLinkResolver", () => {
   it("negatively caches an unknown code so scanners cannot reach the database twice", async () => {
     const prisma = fakePrisma({});
     const { cache, writes } = fakeCache();
-    const resolve = createLinkResolver(prisma.client, cache);
+    const resolve = createLinkResolver(sameNode(prisma.client), cache);
 
     assert.equal((await resolve("nope")).longUrl, null);
     assert.deepEqual(writes, [{ code: "nope", longUrl: null }]);
@@ -103,7 +108,7 @@ describe("createLinkResolver", () => {
     const prisma = fakePrisma({ abc: "https://example.com/target" });
     const { cache } = fakeCache({ abc: { state: "known-missing" } });
 
-    const result = await createLinkResolver(prisma.client, cache)("abc");
+    const result = await createLinkResolver(sameNode(prisma.client), cache)("abc");
 
     assert.equal(result.longUrl, null);
     assert.equal(prisma.reads, 0);
@@ -112,7 +117,7 @@ describe("createLinkResolver", () => {
   it("coalesces concurrent misses for the same code into one database read", async () => {
     const prisma = fakePrisma({ hot: "https://example.com/viral" }, 25);
     const { cache } = fakeCache();
-    const resolve = createLinkResolver(prisma.client, cache);
+    const resolve = createLinkResolver(sameNode(prisma.client), cache);
 
     const results = await Promise.all(Array.from({ length: 20 }, () => resolve("hot")));
 
@@ -125,7 +130,7 @@ describe("createLinkResolver", () => {
   it("does not coalesce different codes", async () => {
     const prisma = fakePrisma({ a: "https://example.com/a", b: "https://example.com/b" }, 10);
     const { cache } = fakeCache();
-    const resolve = createLinkResolver(prisma.client, cache);
+    const resolve = createLinkResolver(sameNode(prisma.client), cache);
 
     await Promise.all([resolve("a"), resolve("b")]);
     assert.equal(prisma.reads, 2);
@@ -134,7 +139,7 @@ describe("createLinkResolver", () => {
   it("stops coalescing once the in-flight read settles", async () => {
     const prisma = fakePrisma({ abc: "https://example.com/target" }, 5);
     const { cache } = fakeCache();
-    const resolve = createLinkResolver(prisma.client, cache);
+    const resolve = createLinkResolver(sameNode(prisma.client), cache);
 
     await resolve("abc");
     const second = await resolve("abc");
@@ -156,7 +161,7 @@ describe("createLinkResolver", () => {
       async forget() {},
     };
 
-    const resolve = createLinkResolver(prisma.client, deadCache);
+    const resolve = createLinkResolver(sameNode(prisma.client), deadCache);
 
     assert.equal((await resolve("abc")).longUrl, "https://example.com/target");
     assert.equal((await resolve("abc")).longUrl, "https://example.com/target");

@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { decodeCode, encodeId } from "./codes.js";
 import type { LinkCache } from "./cache.js";
-import { createLinkResolver } from "./links.js";
+import { createLinkResolver, type Databases } from "./links.js";
 import { createRateLimiter } from "./rateLimit.js";
 import { hashIp, type EventPublisher } from "./events.js";
 import { readTrending, type TrendingEntry } from "./trending.js";
@@ -51,8 +51,8 @@ function originFor(req: Request): string {
 }
 
 export interface AppDeps {
-  /** Primary. All writes go here. */
-  prisma: PrismaClient;
+  /** Primary for writes, replica for reads. Both may be the same client. */
+  db: Databases;
   cache: LinkCache;
   redis: Redis;
   events: EventPublisher;
@@ -65,9 +65,13 @@ export interface AppDeps {
 }
 
 export function createApp(deps: AppDeps): Express {
-  const { prisma, cache, redis, events, trendingSnapshot } = deps;
+  const { db, cache, redis, events, trendingSnapshot } = deps;
+  // Writes are always the primary. Reads that tolerate a little staleness use
+  // the replica.
+  const prisma = db.write;
+  const replica = db.read;
   const app = express();
-  const resolveLink = createLinkResolver(prisma, cache);
+  const resolveLink = createLinkResolver(db, cache);
 
   const limitCreates = createRateLimiter(redis, {
     name: "create",
@@ -122,11 +126,27 @@ export function createApp(deps: AppDeps): Express {
   app.get("/ready", async (req, res) => {
     try {
       await prisma.$queryRaw`SELECT 1`;
-      res.json({ status: "ready" });
     } catch (error) {
       req.log.error({ err: error }, "readiness check failed");
-      res.status(503).json({ status: "unavailable", error: "Database unreachable." });
+      return res.status(503).json({ status: "unavailable", error: "Database unreachable." });
     }
+
+    // The replica is reported, never required. Reads fall back to the primary
+    // when it is unavailable, so failing readiness here would remove capacity
+    // for a condition the service already handles.
+    let replicaLagSeconds: number | null = null;
+    if (replica !== prisma) {
+      try {
+        const [row] = await replica.$queryRaw<Array<{ lag: number | null }>>`
+          SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::float8 AS lag
+        `;
+        replicaLagSeconds = row?.lag ?? 0;
+      } catch {
+        replicaLagSeconds = null;
+      }
+    }
+
+    return res.json({ status: "ready", replicaLagSeconds });
   });
 
   app.post("/links", limitCreates, async (req, res, next) => {
@@ -151,6 +171,13 @@ export function createApp(deps: AppDeps): Express {
           longUrl: parsed.url.toString(),
         },
       });
+
+      // Warm the cache with what we just wrote. Replication is asynchronous,
+      // so a redirect arriving within the lag window would miss on the replica
+      // and 404 a link that demonstrably exists. Seeding the cache means the
+      // read path never consults the replica for a brand new link at all --
+      // read-your-writes, without a synchronous replica or a primary read.
+      await cache.remember(link.code, link.longUrl);
 
       req.log.info({ code: link.code }, "link created");
 
@@ -183,12 +210,14 @@ export function createApp(deps: AppDeps): Express {
         return res.status(404).json({ error: "Short link not found." });
       }
 
-      const link = await prisma.link.findUnique({ where: { code }, select: { createdAt: true } });
+      // Analytics tolerate replication lag by definition, so they read from
+      // the replica and keep that load off the primary entirely.
+      const link = await replica.link.findUnique({ where: { code }, select: { createdAt: true } });
       if (!link) {
         return res.status(404).json({ error: "Short link not found." });
       }
 
-      const [totals] = await prisma.$queryRaw<Array<{ clicks: bigint; visitors: bigint }>>`
+      const [totals] = await replica.$queryRaw<Array<{ clicks: bigint; visitors: bigint }>>`
         SELECT count(*) AS clicks, count(DISTINCT "ipHash") AS visitors
         FROM click_events WHERE code = ${code}
       `;

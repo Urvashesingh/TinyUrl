@@ -22,6 +22,11 @@ let redis: Redis;
 // A second, ordinary client for test bookkeeping. The app's client has offline
 // queueing disabled by design, so it cannot be used before it is ready.
 let admin: Redis;
+// Exercises the real split when a replica is configured, and degrades to a
+// single node when it is not -- both are supported deployments.
+const replicaClient = config.databaseReplicaUrl
+  ? new PrismaClient({ datasourceUrl: config.databaseReplicaUrl })
+  : null;
 
 let server: Server;
 let origin: string;
@@ -62,7 +67,7 @@ before(async () => {
 
   cache = createLinkCache(redis);
   server = createApp({
-    prisma,
+    db: { write: prisma, read: replicaClient ?? prisma },
     cache,
     redis,
     events: createRedisEventPublisher(redis),
@@ -86,7 +91,12 @@ after(async () => {
   await prisma.clickEvent.deleteMany({ where: { code: { in: createdCodes } } });
   await prisma.link.deleteMany({ where: { code: { in: createdCodes } } });
   await new Promise((resolve) => server.close(resolve));
-  await Promise.allSettled([prisma.$disconnect(), closeRedis(redis), admin.quit()]);
+  await Promise.allSettled([
+    prisma.$disconnect(),
+    replicaClient?.$disconnect() ?? Promise.resolve(),
+    closeRedis(redis),
+    admin.quit(),
+  ]);
 });
 
 describe("GET /health", () => {
@@ -100,8 +110,10 @@ describe("GET /health", () => {
 describe("GET /ready", () => {
   it("reports readiness when the database answers", async () => {
     const response = await api("/ready");
+    const body = (await response.json()) as { status: string };
+
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { status: "ready" });
+    assert.equal(body.status, "ready");
   });
 });
 
@@ -332,5 +344,63 @@ describe("click events", () => {
   it("404s stats for a code that was never issued", async () => {
     assert.equal((await api("/links/notacode/stats")).status, 404);
     assert.equal((await api(`/links/${encodeId(2_999_999_999_999n)}/stats`)).status, 404);
+  });
+});
+
+describe("read/write split", () => {
+  it("warms the cache on create, so the read path never asks the replica", async () => {
+    // Replication is asynchronous. A redirect arriving inside the lag window
+    // would miss on the replica and 404 a link that demonstrably exists.
+    // Seeding the cache at write time is what makes read-your-writes hold
+    // without a synchronous replica or a read against the primary.
+    const longUrl = "https://example.com/read-your-writes";
+    const { code } = (await (await createLink(longUrl)).json()) as { code: string };
+
+    assert.deepEqual(await cache.lookup(code), { state: "hit", longUrl });
+  });
+
+  it("serves a redirect immediately after creation", async () => {
+    const longUrl = "https://example.com/instant";
+    const { code } = (await (await createLink(longUrl)).json()) as { code: string };
+
+    const response = await api(`/${code}`);
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("location"), longUrl);
+  });
+
+  it("still resolves once the cache entry is gone and only the replica can answer", async () => {
+    const longUrl = "https://example.com/from-replica";
+    const { code } = (await (await createLink(longUrl)).json()) as { code: string };
+
+    // Wait for the write to reach the replica, then drop the cached entry so
+    // the next read has to go to the database.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await cache.forget(code);
+
+    const response = await api(`/${code}`);
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("location"), longUrl);
+  });
+
+  it("reports replication lag on the readiness endpoint", async () => {
+    const body = (await (await api("/ready")).json()) as { status: string; replicaLagSeconds: unknown };
+
+    assert.equal(body.status, "ready");
+    if (config.databaseReplicaUrl) {
+      assert.equal(typeof body.replicaLagSeconds, "number");
+    }
+  });
+
+  it("refuses writes on the replica", async (t) => {
+    if (!replicaClient) {
+      return t.skip("no replica configured");
+    }
+
+    // Proves the split is real: the read client physically cannot write, so a
+    // stray write cannot silently succeed against the wrong node.
+    await assert.rejects(
+      replicaClient.$executeRaw`INSERT INTO links (id, code, "longUrl") VALUES (987654321, 'zzz', 'https://x')`,
+      /read-only/i,
+    );
   });
 });

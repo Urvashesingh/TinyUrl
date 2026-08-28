@@ -1,7 +1,7 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 through 5 are
+distributed-systems machinery and the reasoning behind it. **Phases 0 through 6 are
 complete and tested.**
 
 - Node 22 · TypeScript (strict) · Express
@@ -10,12 +10,12 @@ complete and tested.**
 - Structured JSON logging via pino, with per-request correlation ids
 - Kafka (KRaft) for the durable click-event log
 - Docker Compose for local infrastructure
-- 96 tests on `node:test`, no test framework dependency
+- 101 tests on `node:test`, no test framework dependency
 
 ## Quick start
 
 ```bash
-docker compose up -d          # Postgres + Redis + Kafka
+docker compose up -d          # Postgres (+replica), Redis, Kafka
 cp .env.example .env
 npm install
 npx prisma migrate dev
@@ -500,6 +500,59 @@ Redis holding a derived counter must never block the system of record.
 
 ---
 
+## Phase 6 — read replica and read/write split
+
+A streaming standby is built by cloning the primary on first start
+(`pg_basebackup -R`). Writes go to the primary; reads that tolerate staleness
+go to the replica.
+
+### The interesting problem is read-your-writes
+
+Replication is asynchronous. Create a link and click it immediately and the
+redirect can reach the replica *before* the row does — a 404 for a link that
+demonstrably exists, and the user has no way to tell it is temporary.
+
+The usual answers are a synchronous replica (which makes every write wait for
+the standby) or routing recent reads to the primary (which needs session
+tracking and gives back the load you were trying to shed).
+
+Neither is needed here, because Phase 1 already built the fix. Creation seeds
+the cache with the row it just wrote, so a redirect for a brand new link is
+served from Redis and never consults the database at all. The lag window is
+covered by a cache entry that cannot be stale, because it was written by the
+same request that created the row.
+
+### The replica is optional, at every level
+
+`DATABASE_REPLICA_URL` unset means reads go to the primary, with no separate
+code path for single-node deployments. When it *is* set and a replica read
+fails, the read falls back to the primary — slower and under more load, but
+correct. And `/ready` reports replication lag without ever failing on it:
+failing readiness for a replica outage would remove capacity for a condition
+the service already handles.
+
+### What the split actually buys
+
+Redirect lookups and analytics queries are the overwhelming majority of the
+traffic and all of them tolerate a second of staleness. Moving them off the
+primary leaves it doing almost nothing but writes. `GET /links/:code/stats`
+in particular runs an aggregate over `click_events`, which is exactly the kind
+of query you do not want competing with the write path.
+
+The replica physically refuses writes (`cannot execute INSERT in a read-only
+transaction`), which is the useful property: a stray write cannot silently
+succeed against the wrong node. There is a test asserting it.
+
+### Local caveat
+
+`docker/postgres/10-replication.sh` adds `host replication all all trust` to
+the primary's `pg_hba.conf`, because initdb writes no rule for replication and
+`pg_basebackup` is refused before it can authenticate. `trust` is a
+development convenience — a real deployment uses a dedicated role with the
+REPLICATION attribute, scram-sha-256, and a narrower source range.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -512,7 +565,7 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - **No cache metrics.** Hit rate is greppable from logs, not measurable. Phase 12.
 - **Click counts can over-count** after a consumer crash, because delivery is
   at-least-once with no dedup key.
-- **Single instance.** No connection-pool tuning, no read replica.
+- **Single instance.** No connection-pool tuning.
 - **The multiplier is not secret**, as discussed above.
 - **`npm audit` reports 3 high advisories** in `deepmerge-ts`, reached only
   through the `prisma` CLI devDependency. No patched version is in range and it
@@ -526,7 +579,7 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 3** — Redirect events via Redis pub/sub
 - [x] **Phase 4** — Swap pub/sub for Kafka/RabbitMQ
 - [x] **Phase 5** — Live trending leaderboard (WebSockets + Redis sorted sets)
-- [ ] **Phase 6** — Postgres read replica + read/write split
+- [x] **Phase 6** — Postgres read replica + read/write split
 - [ ] **Phase 7** — Partition the click-events table
 - [ ] **Phase 8** — Dockerize all services + compose
 - [ ] **Phase 9** — Kubernetes (minikube)

@@ -9,15 +9,65 @@ services:
       POSTGRES_USER: shortener
       POSTGRES_PASSWORD: shortener
       POSTGRES_DB: shortener
+    # wal_level=replica is already the default in modern Postgres; it is spelled
+    # out here because the whole standby depends on it and a silent default is a
+    # bad thing to depend on.
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - hot_standby=on
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U shortener"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Phase 6. Streaming replica, built by cloning the primary on first start.
+  postgres-replica:
+    image: postgres:17-alpine
+    container_name: shortener-postgres-replica
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-replica-data:/var/lib/postgresql/data
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        chown -R postgres:postgres /var/lib/postgresql
+        # An empty data directory means this is a fresh standby: clone the
+        # primary. -R writes standby.signal and primary_conninfo, which is what
+        # makes this a streaming replica rather than a one-off copy.
+        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          until gosu postgres pg_isready -h postgres -U shortener -q; do
+            echo "waiting for primary"; sleep 1;
+          done
+          rm -rf "$$PGDATA"/*
+          gosu postgres pg_basebackup -h postgres -U shortener -D "$$PGDATA" -Fp -Xs -R
+        fi
+        chmod 0700 "$$PGDATA"
+        exec gosu postgres postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortener"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   redis:
     image: redis:7-alpine
@@ -82,4 +132,5 @@ services:
 
 volumes:
   postgres-data:
+  postgres-replica-data:
   kafka-data:

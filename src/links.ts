@@ -1,5 +1,13 @@
 import type { PrismaClient } from "@prisma/client";
 import type { LinkCache } from "./cache.js";
+import { logger } from "./logger.js";
+
+export interface Databases {
+  /** Primary. Authoritative, accepts writes. */
+  write: PrismaClient;
+  /** Replica, or the primary again when no replica is configured. */
+  read: PrismaClient;
+}
 
 export type CacheOutcome = "hit" | "miss" | "coalesced";
 
@@ -18,7 +26,7 @@ export type LinkResolver = (code: string) => Promise<Resolution>;
  * it will populate it on the way through. The alternative, write-through,
  * would fill the cache with links that may never be clicked.
  */
-export function createLinkResolver(prisma: PrismaClient, cache: LinkCache): LinkResolver {
+export function createLinkResolver(db: Databases, cache: LinkCache): LinkResolver {
   // Single-flight: while one request is reading a given code from Postgres,
   // concurrent requests for the same code wait on that read instead of piling
   // on. This is what stops a newly popular link from turning a cold cache into
@@ -30,11 +38,24 @@ export function createLinkResolver(prisma: PrismaClient, cache: LinkCache): Link
   // failure modes cost more than they save at this scale.
   const inFlight = new Map<string, Promise<string | null>>();
 
+  async function findLink(code: string): Promise<{ longUrl: string } | null> {
+    try {
+      return await db.read.link.findUnique({ where: { code }, select: { longUrl: true } });
+    } catch (error) {
+      if (db.read === db.write) {
+        throw error;
+      }
+
+      // The replica is an optimisation, not a dependency. If it is unreachable
+      // or still catching up after a restart, the primary can answer -- slower
+      // and under more load, but correct.
+      logger.warn({ err: error }, "replica read failed, falling back to primary");
+      return db.write.link.findUnique({ where: { code }, select: { longUrl: true } });
+    }
+  }
+
   async function readThrough(code: string): Promise<string | null> {
-    const link = await prisma.link.findUnique({
-      where: { code },
-      select: { longUrl: true },
-    });
+    const link = await findLink(code);
 
     if (link) {
       await cache.remember(code, link.longUrl);

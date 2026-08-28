@@ -37,6 +37,12 @@ export const config = {
   /** Enable when running behind a load balancer so req.protocol sees X-Forwarded-Proto. */
   trustProxy: process.env.TRUST_PROXY === "true",
 
+  /**
+   * Read replica. When unset, reads go to the primary -- the split is an
+   * optimisation, and a single-node deployment must still work unchanged.
+   */
+  databaseReplicaUrl: process.env.DATABASE_REPLICA_URL || null,
+
   redisUrl: process.env.REDIS_URL ?? "redis://127.0.0.1:6379",
 
   /**
