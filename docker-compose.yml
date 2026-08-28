@@ -155,7 +155,8 @@ services:
   api:
     build: .
     image: url-shortener:local
-    container_name: shortener-api
+    # No container_name and a port *range*: both of those pin a service to a
+    # single instance, and `--scale api=3` fails on a name or port collision.
     profiles: ["app"]
     restart: unless-stopped
     environment: &app-env
@@ -170,7 +171,7 @@ services:
       BASE_URL: http://localhost:3000
       LOG_LEVEL: info
     ports:
-      - "3000:3000"
+      - "3000-3010:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -184,7 +185,6 @@ services:
   consumer:
     build: .
     image: url-shortener:local
-    container_name: shortener-consumer
     profiles: ["app"]
     restart: unless-stopped
     command: ["node", "dist/consumer.js"]

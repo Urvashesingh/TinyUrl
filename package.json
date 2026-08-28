@@ -19,7 +19,8 @@
     "start:consumer": "node dist/consumer.js",
     "partitions": "tsx scripts/partitions.ts",
     "k8s:render": "kubectl kustomize k8s/",
-    "k8s:validate": "kubectl kustomize k8s/ | docker run --rm -i ghcr.io/yannh/kubeconform:latest -strict -summary -kubernetes-version 1.30.0 -"
+    "k8s:validate": "kubectl kustomize k8s/ | docker run --rm -i ghcr.io/yannh/kubeconform:latest -strict -summary -kubernetes-version 1.30.0 -",
+    "loadtest": "docker run --rm -i --network url-shortener_default -v \"%cd%/loadtest:/scripts\" grafana/k6:latest run /scripts/redirect.js"
   },
   "dependencies": {
     "@prisma/client": "^6.2.1",

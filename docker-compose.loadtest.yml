@@ -1,0 +1,12 @@
+# Overrides for load testing. Applied with:
+#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml --profile app up -d
+#
+# The rate limiter is raised almost out of the way on purpose. It has its own
+# tests; leaving it at production values here would mean measuring the limiter
+# rather than the system behind it, and every run would flatten at 10 req/s.
+services:
+  api:
+    environment:
+      CREATE_RATE_LIMIT: "100000"
+      REDIRECT_RATE_LIMIT: "10000000"
+      LOG_LEVEL: "warn"

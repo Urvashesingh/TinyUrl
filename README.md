@@ -743,6 +743,76 @@ empty, and a non-empty default makes creating that month's partition fail.
 
 ---
 
+## Phase 11 — load testing until it breaks
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml --profile app up -d
+npm run loadtest        # ramp until the thresholds break
+```
+
+Rate limits are raised for these runs. The limiter has its own tests; leaving
+it at production values would flatten every run at 10 req/s and measure the
+limiter rather than the system behind it.
+
+### Where it breaks
+
+Arrival rate held steady at each step, `p95 < 200ms` as the SLO:
+
+| Rate | 1 replica | 3 replicas |
+| ---: | ---: | ---: |
+| 200/s | **12 ms** | — |
+| 400/s | 121 ms | **15 ms** |
+| 600/s | 451 ms | **29 ms** |
+| 800/s | 646 ms | — |
+| 1000/s | — | **144 ms** |
+| 1600/s | — | 438 ms |
+
+**One replica holds about 400 req/s. Three hold about 1100.** That is close to
+linear, which is the answer you want for a stateless service and the thing that
+justifies the HPA in Phase 10.
+
+Errors stayed at 0.00% throughout. The service does not fall over under
+overload, it queues — latency degrades long before anything fails, and the
+`p99` blows out to tens of seconds while the `p95` still looks survivable.
+That gap is the interesting part: an SLO written on averages, or even on p95,
+would have called 800 req/s healthy.
+
+### What actually saturates
+
+`docker stats` during a 1200 req/s run, three replicas:
+
+```
+url-shortener-api-1   101.92%
+url-shortener-api-2   105.06%
+url-shortener-api-3   101.81%
+shortener-redis        45.48%
+shortener-postgres     ~20%
+```
+
+Every API replica is pinned at one core; Redis and Postgres are barely
+working. **The bottleneck is Node being single-threaded** — one process uses
+one core no matter how many the host has. That is why the fix is more replicas
+rather than a bigger machine, and it is worth knowing *before* someone
+suggests vertical scaling.
+
+It also means the caching work is doing its job: at 400 req/s per replica,
+Postgres is close to idle because nearly every redirect is served from Redis.
+
+### Methodology, and its limits
+
+An arrival-rate executor rather than a fixed number of VUs. With VUs, a
+slowing system quietly issues fewer requests and hides its own breaking point;
+arrival rate holds the offered load constant and lets the queue grow, which is
+what actually happens in production.
+
+**The honest caveat:** the load generator runs on the same machine as the
+system under test, and k6 itself used ~78% of a core. Contention is real and
+these numbers are a lower bound. The *shape* — linear scaling, CPU-bound at one
+core per process, zero errors under overload — is trustworthy; the absolute
+figures would need a separate load-generating host to defend.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -776,6 +846,6 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 8** — Dockerize all services + compose
 - [x] **Phase 9** — Kubernetes manifests *(schema-validated, not cluster-tested)*
 - [x] **Phase 10** — Horizontal Pod Autoscaler *(schema-validated, not cluster-tested)*
-- [ ] **Phase 11** — Load test with k6 until it breaks
+- [x] **Phase 11** — Load test with k6 until it breaks
 - [ ] **Phase 12** — Prometheus + Grafana + structured logs
 - [ ] **Phase 13** — CI/CD with GitHub Actions
