@@ -67,3 +67,23 @@ export function createLinkCache(redis: Redis): LinkCache {
     },
   };
 }
+
+/**
+ * A cache that never remembers anything.
+ *
+ * Used in the minimal profile, where there is no Redis. Every lookup reports a
+ * miss and every write is discarded, so the read path falls through to
+ * Postgres on every request -- slower, and entirely correct. This is the same
+ * behaviour the real cache degrades to when Redis is unreachable, which is why
+ * no other code needs to know which one it has.
+ */
+export function createNullCache(): LinkCache {
+  return {
+    async lookup(): Promise<CacheLookup> {
+      return { state: "miss" };
+    },
+    async remember() {},
+    async rememberMissing() {},
+    async forget() {},
+  };
+}

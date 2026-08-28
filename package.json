@@ -1,7 +1,7 @@
 {
   "name": "url-shortener",
   "version": "0.1.0",
-  "description": "URL shortener with real-time analytics — a phase-by-phase learning project",
+  "description": "URL shortener with real-time analytics \u2014 a phase-by-phase learning project",
   "type": "module",
   "scripts": {
     "postinstall": "prisma generate",
@@ -10,8 +10,8 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "npm run test:unit && npm run test:integration",
-    "test:unit": "node --import tsx --test test/base62.test.ts test/codes.test.ts test/links.test.ts test/batch.test.ts test/events.test.ts",
-    "test:integration": "node --import tsx --test test/cache.test.ts test/rateLimit.test.ts test/trending.test.ts test/liveFeed.test.ts test/partitions.test.ts test/kafka.test.ts test/api.test.ts",
+    "test:unit": "node --import tsx --test test/base62.test.ts test/codes.test.ts test/links.test.ts test/batch.test.ts test/events.test.ts test/vercelPath.test.ts",
+    "test:integration": "node --import tsx --test test/cache.test.ts test/rateLimit.test.ts test/trending.test.ts test/liveFeed.test.ts test/partitions.test.ts test/kafka.test.ts test/minimal.test.ts test/api.test.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",

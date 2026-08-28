@@ -15,6 +15,32 @@ function readInteger(name: string, fallback: number): number {
 }
 
 export const config = {
+  /**
+   * Which shape of this system is running.
+   *
+   *   full     Redis, Kafka, WebSockets, background timers. Needs long-lived
+   *            processes -- Compose locally, or containers on a real host.
+   *   minimal  Postgres only. Create and redirect, nothing else. This is what
+   *            fits a serverless platform, where a function wakes up, answers
+   *            one request and dies: there is nowhere to keep a cache
+   *            connection, a WebSocket, or a background consumer alive.
+   *
+   * Same codebase either way. The difference is which dependencies get wired
+   * in at startup, not which code exists.
+   */
+  profile: (process.env.APP_PROFILE ?? "full") as "full" | "minimal",
+
+  /**
+   * When set, POST /links requires it in X-API-Key. Redirects stay public.
+   *
+   * This is the control that makes a public deployment safe: an open,
+   * unauthenticated shortener gets found by scanners and used to launder
+   * phishing links behind your domain. Rate limiting slows a script; it does
+   * not stop someone with many addresses. Needs no Redis, so it works in the
+   * minimal profile where the rate limiter cannot.
+   */
+  createApiKey: process.env.CREATE_API_KEY || null,
+
   port: readInteger("PORT", 3000),
 
   /**
@@ -87,7 +113,7 @@ export const config = {
    * at-most-once and loses everything published while no consumer is
    * connected. "kafka" is Phase 4: durable, replayable, at-least-once.
    */
-  eventTransport: (process.env.EVENT_TRANSPORT ?? "kafka") as "redis" | "kafka",
+  eventTransport: (process.env.EVENT_TRANSPORT ?? "kafka") as "redis" | "kafka" | "none",
 
   kafka: {
     brokers: (process.env.KAFKA_BROKERS ?? "localhost:9092").split(",").map((b) => b.trim()),

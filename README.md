@@ -11,7 +11,7 @@ available — that gap is stated wherever it matters rather than papered over.
 - Structured JSON logging via pino, with per-request correlation ids
 - Kafka (KRaft) for the durable click-event log
 - Docker Compose for local infrastructure
-- 113 tests on `node:test`, no test framework dependency
+- 123 tests on `node:test`, no test framework dependency
 - Prometheus + Grafana, k6 load tests, GitHub Actions CI
 
 ## Quick start
@@ -34,15 +34,99 @@ npm run build && npm start    # compiled
 suite drives a real HTTP server against both and cleans up what it creates.
 `npm run test:unit` needs neither and runs in about a second.
 
+## Two ways to run it
+
+This system has two shapes, selected by `APP_PROFILE`, and they share one
+codebase — the difference is which dependencies get wired in at startup, not
+which code exists.
+
+| | `full` | `minimal` |
+| --- | --- | --- |
+| Where | Docker Compose, or containers on a real host | Vercel / any serverless platform |
+| Storage | Postgres + replica | Postgres |
+| Cache, rate limiting, trending | Redis | none |
+| Click analytics | Kafka + consumer | none |
+| Live leaderboard | WebSocket | none |
+| What works | everything | create a link, follow a link |
+
+**Why the split is not laziness.** A serverless function wakes up, answers one
+request, and is frozen or discarded. There is nowhere to keep a Redis
+connection pooled, a WebSocket open, a 2-second timer ticking, or a Kafka
+consumer running — those need a process that stays alive between requests.
+The minimal profile is the part of this system that genuinely fits that model.
+
+## Deploying the minimal profile
+
+### 1. Postgres on Supabase
+
+Create a project, then take **both** connection strings from
+Project Settings → Database:
+
+- **Transaction pooler**, port 6543 → `DATABASE_URL`, with
+  `?pgbouncer=true&connection_limit=1` appended
+- **Direct connection**, port 5432 → `DIRECT_DATABASE_URL`
+
+Two URLs because serverless functions open a connection per instance, so the
+app must go through the pooler or Postgres runs out of connections long before
+traffic gets interesting. Migrations must *not*: they issue DDL and advisory
+locks, neither of which survives a transaction-mode pooler.
+
+Run the migrations from your own machine:
+
+```bash
+DATABASE_URL="<pooled>" DIRECT_DATABASE_URL="<direct>" npx prisma migrate deploy
+```
+
+### 2. Vercel
+
+Import the repository, framework preset **Other**, and set:
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | the pooled Supabase URL |
+| `DIRECT_DATABASE_URL` | the direct Supabase URL |
+| `APP_PROFILE` | `minimal` |
+| `TRUST_PROXY` | `true` |
+| `CREATE_API_KEY` | a long random string |
+
+`TRUST_PROXY` matters: without it Express reads the scheme as `http` behind
+Vercel's proxy and hands back `http://` short URLs on an HTTPS site.
+
+`CREATE_API_KEY` is the one that matters more. Without it anyone can create
+links on your domain, and an open shortener gets found by scanners and used to
+launder phishing links behind whatever reputation your domain has. With it,
+creation needs the header and redirects stay public — which is the correct
+split, because the entire point of a short link is that anyone can follow it.
+
+```bash
+curl -X POST https://your-app.vercel.app/links   -H "Content-Type: application/json"   -H "X-API-Key: <your key>"   -d '{"longUrl":"https://example.com/a/very/long/url"}'
+```
+
+Then open the `shortUrl` it returns.
+
+### How the routing works
+
+Every path has to reach one function, so `vercel.json` rewrites `/(.*)` to
+`/api?__path=$1` and the handler puts the original path back before Express
+routes on it. Passing the path explicitly rather than relying on how a platform
+happens to present `req.url` after a rewrite is deliberate: if that were wrong,
+every short code would resolve to the same route and the whole service would
+404. `normalizeRequestUrl` has its own unit tests for exactly that reason.
+
+**Verified locally, not on Vercel.** The handler was driven directly with the
+rewrite's URL shape (`/api?__path=<code>`) and creates, redirects, 404s and
+health checks all behave. The Vercel build itself is unverified — deploying
+needs an account this environment does not have.
+
 ## API
 
 | Method | Path      | Behaviour |
 | ------ | --------- | --------- |
 | `GET`  | `/health` | Liveness. Always `200` while the process is up; never touches Postgres. |
 | `GET`  | `/ready`  | Readiness. `200` when Postgres answers, `503` when it does not. Redis being down does **not** fail this. |
-| `POST` | `/links`  | `201` with the created link. `400` on an invalid `longUrl`, `413` on an oversized body. |
+| `POST` | `/links`  | `201` with the created link. Requires `X-API-Key` when `CREATE_API_KEY` is set. `400` on an invalid `longUrl`, `413` on an oversized body. |
 | `GET`  | `/links/:code/stats` | Click count and unique visitors for one link. |
-| `GET`  | `/trending` | Top links over the trailing window. |
+| `GET`  | `/trending` | Top links over the trailing window. *(full profile only)* |
 | `WS`   | `/live`   | Pushes the trending board as it changes. |
 | `GET`  | `/:code`  | `302` to the stored URL with `Cache-Control: no-store`. `404` if unknown. |
 

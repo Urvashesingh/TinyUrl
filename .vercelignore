@@ -1,0 +1,11 @@
+# Only the API and its schema need to reach Vercel. Everything else is the
+# full-profile system, which runs under Docker Compose.
+docker
+k8s
+loadtest
+test
+dist
+node_modules
+docker-compose*.yml
+Dockerfile
+.github

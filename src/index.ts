@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { createApp } from "./app.js";
-import { createLinkCache } from "./cache.js";
-import { createRedisEventPublisher, type EventPublisher } from "./events.js";
+import { createLinkCache, createNullCache } from "./cache.js";
+import { createRedisEventPublisher, nullEventPublisher, type EventPublisher } from "./events.js";
 import { createKafka, createKafkaEventPublisher, ensureClickTopic } from "./kafka.js";
 import { closeRedis, createRedis } from "./redis.js";
 import { attachLiveFeed } from "./liveFeed.js";
@@ -20,8 +20,14 @@ const replica = config.databaseReplicaUrl
   : prisma;
 
 const db = { write: prisma, read: replica };
-const redis = createRedis("api");
-const cache = createLinkCache(redis);
+
+// The minimal profile is what runs on a serverless platform: Postgres only,
+// no cache, no events, no background timers. Running it here too means the
+// deployed shape can be exercised locally rather than discovered in production.
+const minimal = config.profile === "minimal";
+
+const redis = minimal ? null : createRedis("api");
+const cache = redis ? createLinkCache(redis) : createNullCache();
 
 let droppedEvents = 0;
 function noteDroppedEvent(): void {
@@ -34,16 +40,20 @@ function noteDroppedEvent(): void {
   }
 }
 
-let events: EventPublisher;
+let events: EventPublisher = nullEventPublisher;
 let closeEvents: () => Promise<void> = async () => {};
 
-if (config.eventTransport === "kafka") {
+if (minimal || config.eventTransport === "none") {
+  // Nothing consumes them and nothing stores them; publishing would be a
+  // guaranteed drop on every redirect.
+  events = nullEventPublisher;
+} else if (config.eventTransport === "kafka") {
   const kafka = createKafka("api");
   await ensureClickTopic(kafka);
   const publisher = await createKafkaEventPublisher(kafka, noteDroppedEvent);
   events = publisher;
   closeEvents = () => publisher.close();
-} else {
+} else if (redis) {
   events = createRedisEventPublisher(redis, noteDroppedEvent);
 }
 
@@ -55,19 +65,28 @@ let liveFeed: ReturnType<typeof attachLiveFeed> | null = null;
 const app = createApp({
   db,
   cache,
-  redis,
+  ...(redis ? { redis } : {}),
   events,
   trendingSnapshot: () => liveFeed?.snapshot() ?? [],
 });
 
 const server = app.listen(config.port, () => {
   logger.info(
-    { port: config.port, transport: config.eventTransport, replica: replica !== prisma },
+    {
+      port: config.port,
+      profile: config.profile,
+      transport: minimal ? "none" : config.eventTransport,
+      replica: replica !== prisma,
+    },
     "listening",
   );
 });
 
-liveFeed = attachLiveFeed(server, redis);
+// WebSockets need a process that stays alive between requests, which is
+// exactly what a serverless function is not.
+if (redis) {
+  liveFeed = attachLiveFeed(server, redis);
+}
 
 /** How long in-flight requests get to finish before we stop being polite. */
 const SHUTDOWN_GRACE_MS = 10_000;
@@ -99,7 +118,7 @@ async function shutdown(signal: string): Promise<void> {
     closeEvents(),
     prisma.$disconnect(),
     replica === prisma ? Promise.resolve() : replica.$disconnect(),
-    closeRedis(redis),
+    redis ? closeRedis(redis) : Promise.resolve(),
   ]);
   process.exit(0);
 }

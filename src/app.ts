@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import express, { type Express, type NextFunction, type Request, type Response } from "express";
+import express, {
+  type Express,
+  type NextFunction,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from "express";
 import pinoHttp from "pino-http";
 import type { PrismaClient } from "@prisma/client";
 import type Redis from "ioredis";
@@ -60,7 +66,8 @@ export interface AppDeps {
   /** Primary for writes, replica for reads. Both may be the same client. */
   db: Databases;
   cache: LinkCache;
-  redis: Redis;
+  /** Absent in the minimal profile: no cache, no rate limiting, no trending. */
+  redis?: Redis;
   events: EventPublisher;
   /**
    * Supplies the leaderboard already computed by the live feed. Without it the
@@ -79,14 +86,35 @@ export function createApp(deps: AppDeps): Express {
   const app = express();
   const resolveLink = createLinkResolver(db, cache);
 
-  const limitCreates = createRateLimiter(redis, {
-    name: "create",
-    ...config.createRateLimit,
-  });
-  const limitRedirects = createRateLimiter(redis, {
-    name: "redirect",
-    ...config.redirectRateLimit,
-  });
+  // Rate limiting needs shared state across instances, which means Redis.
+  // Without it the limiters are omitted rather than faked: a per-instance
+  // in-memory limiter on a serverless platform would count each cold start
+  // separately and give a false sense of protection. The API key below is the
+  // control that actually works there.
+  const noLimit: RequestHandler = (_req, _res, next) => next();
+  const limitCreates = redis
+    ? createRateLimiter(redis, { name: "create", ...config.createRateLimit })
+    : noLimit;
+  const limitRedirects = redis
+    ? createRateLimiter(redis, { name: "redirect", ...config.redirectRateLimit })
+    : noLimit;
+
+  /**
+   * Guards creation when CREATE_API_KEY is set. Redirects are always public --
+   * the whole point of a short link is that anyone can follow it.
+   */
+  const requireApiKey: RequestHandler = (req, res, next) => {
+    if (!config.createApiKey) {
+      return next();
+    }
+
+    const supplied = req.get("x-api-key");
+    if (supplied !== config.createApiKey) {
+      return res.status(401).json({ error: "A valid X-API-Key header is required to create links." });
+    }
+
+    return next();
+  };
 
   app.disable("x-powered-by");
   if (config.trustProxy) {
@@ -158,10 +186,10 @@ export function createApp(deps: AppDeps): Express {
       }
     }
 
-    return res.json({ status: "ready", replicaLagSeconds });
+    return res.json({ status: "ready", profile: config.profile, replicaLagSeconds });
   });
 
-  app.post("/links", limitCreates, async (req, res, next) => {
+  app.post("/links", limitCreates, requireApiKey, async (req, res, next) => {
     try {
       const parsed = parseLongUrl(req.body?.longUrl);
       if ("reason" in parsed) {
@@ -205,14 +233,20 @@ export function createApp(deps: AppDeps): Express {
     }
   });
 
-  app.get("/trending", async (_req, res, next) => {
-    try {
-      const entries = trendingSnapshot?.() ?? (await readTrending(redis));
-      return res.json({ window: `${config.trending.windowMinutes}m`, entries });
-    } catch (error) {
-      return next(error);
-    }
-  });
+  // Trending is backed by Redis sorted sets, so it exists only when Redis
+  // does. Omitted rather than stubbed: a leaderboard that is always empty is
+  // worse than a 404, because it looks like the feature is broken.
+  if (redis) {
+    const trendingRedis = redis;
+    app.get("/trending", async (_req, res, next) => {
+      try {
+        const entries = trendingSnapshot?.() ?? (await readTrending(trendingRedis));
+        return res.json({ window: `${config.trending.windowMinutes}m`, entries });
+      } catch (error) {
+        return next(error);
+      }
+    });
+  }
 
   // Two path segments, so this cannot be shadowed by the single-segment
   // catch-all below -- but it still has to be declared first to be safe.

@@ -39,6 +39,9 @@ jobs:
     timeout-minutes: 20
     env:
       DATABASE_URL: postgresql://shortener:shortener@127.0.0.1:5432/shortener?schema=public
+      # The schema declares directUrl for Supabase, where migrations must
+      # bypass the transaction pooler. Locally both point at the same database.
+      DIRECT_DATABASE_URL: postgresql://shortener:shortener@127.0.0.1:5432/shortener?schema=public
       DATABASE_REPLICA_URL: postgresql://shortener:shortener@127.0.0.1:5433/shortener?schema=public
       REDIS_URL: redis://127.0.0.1:6379
       KAFKA_BROKERS: localhost:9092
