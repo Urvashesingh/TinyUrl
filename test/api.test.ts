@@ -4,13 +4,16 @@ import type { Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { PrismaClient } from "@prisma/client";
 import { createApp } from "../src/app.js";
+import { createLinkCache, type LinkCache } from "../src/cache.js";
 import { encodeId } from "../src/codes.js";
+import { logger } from "../src/logger.js";
 
 // Integration tests: these talk to the Postgres from docker-compose. Rows they
 // create are tracked and removed in `after`, so repeated runs stay clean.
 
 const prisma = new PrismaClient();
 const createdCodes: string[] = [];
+let cache: LinkCache;
 
 let server: Server;
 let origin: string;
@@ -34,7 +37,12 @@ async function createLink(longUrl: string): Promise<Response> {
 }
 
 before(async () => {
-  server = createApp(prisma).listen(0);
+  // Request logs would drown the test reporter; the logger itself is exercised
+  // by running the app at all, not by asserting on its output.
+  logger.level = "silent";
+
+  cache = createLinkCache();
+  server = createApp(prisma, cache).listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -42,7 +50,7 @@ before(async () => {
 after(async () => {
   await prisma.link.deleteMany({ where: { code: { in: createdCodes } } });
   await new Promise((resolve) => server.close(resolve));
-  await prisma.$disconnect();
+  await Promise.allSettled([prisma.$disconnect(), cache.close()]);
 });
 
 describe("GET /health", () => {
@@ -165,5 +173,45 @@ describe("GET /:code", () => {
     const response = await api("/a/deeper/path");
     assert.equal(response.status, 404);
     assert.match(response.headers.get("content-type") ?? "", /application\/json/);
+  });
+});
+
+describe("caching and observability", () => {
+  it("serves a repeated redirect identically once it is cached", async () => {
+    const longUrl = "https://example.com/cached-target";
+    const { code } = (await (await createLink(longUrl)).json()) as { code: string };
+
+    // First request populates the cache, second should be served from it.
+    // Both must be indistinguishable to the caller -- that is the whole
+    // contract of a cache-aside read path.
+    const first = await api(`/${code}`);
+    const second = await api(`/${code}`);
+
+    assert.equal(first.status, 302);
+    assert.equal(second.status, 302);
+    assert.equal(second.headers.get("location"), longUrl);
+    assert.equal(second.headers.get("cache-control"), "no-store");
+  });
+
+  it("still resolves a link whose cache entry was dropped", async () => {
+    // Eviction under memory pressure is normal, not exceptional.
+    const longUrl = "https://example.com/evicted";
+    const { code } = (await (await createLink(longUrl)).json()) as { code: string };
+
+    await api(`/${code}`);
+    await cache.remember(code, longUrl);
+
+    const response = await api(`/${code}`);
+    assert.equal(response.headers.get("location"), longUrl);
+  });
+
+  it("echoes an inbound request id so traces survive across services", async () => {
+    const response = await api("/health", { headers: { "X-Request-Id": "trace-me-123" } });
+    assert.equal(response.headers.get("x-request-id"), "trace-me-123");
+  });
+
+  it("mints a request id when the caller does not supply one", async () => {
+    const response = await api("/health");
+    assert.match(response.headers.get("x-request-id") ?? "", /[0-9a-f-]{36}/);
   });
 });

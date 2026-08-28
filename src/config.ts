@@ -36,4 +36,22 @@ export const config = {
 
   /** Enable when running behind a load balancer so req.protocol sees X-Forwarded-Proto. */
   trustProxy: process.env.TRUST_PROXY === "true",
+
+  redisUrl: process.env.REDIS_URL ?? "redis://127.0.0.1:6379",
+
+  /**
+   * How long a resolved link stays cached. Links are immutable today, so this
+   * is purely a memory bound rather than a staleness bound -- see the note on
+   * invalidation in the README before that stops being true.
+   */
+  cacheTtlSeconds: readInteger("CACHE_TTL_SECONDS", 3600),
+
+  /**
+   * Misses are cached too, so a scanner walking the code space cannot turn
+   * every request into a database read. Kept short: a cached miss is a promise
+   * that a code does not exist, and codes get created all the time.
+   */
+  missCacheTtlSeconds: readInteger("MISS_CACHE_TTL_SECONDS", 30),
+
+  logLevel: process.env.LOG_LEVEL ?? "info",
 } as const;

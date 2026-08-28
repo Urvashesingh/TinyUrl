@@ -1,5 +1,5 @@
-# Local infrastructure. Phase 0 needs only Postgres.
-# Redis (Phase 1), Kafka (Phase 4), etc. get added as we reach them.
+# Local infrastructure.
+# Phase 0 needs Postgres. Phase 1 adds Redis. Kafka (Phase 4) comes later.
 services:
   postgres:
     image: postgres:17-alpine
@@ -17,6 +17,30 @@ services:
       test: ["CMD-SHELL", "pg_isready -U shortener"]
       interval: 5s
       timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: shortener-redis
+    restart: unless-stopped
+    # This Redis holds only derived data, so it is configured as a pure cache:
+    #   --save ""             no RDB snapshots; losing it costs a few slow reads
+    #   --maxmemory           a hard ceiling, so it cannot starve the host
+    #   allkeys-lru           evict cold keys instead of erroring on OOM
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
       retries: 5
 
 volumes:
