@@ -10,6 +10,7 @@ import type { LinkCache } from "./cache.js";
 import { createLinkResolver } from "./links.js";
 import { createRateLimiter } from "./rateLimit.js";
 import { hashIp, type EventPublisher } from "./events.js";
+import { readTrending, type TrendingEntry } from "./trending.js";
 
 type UrlRejection = "missing" | "malformed" | "unsupported_scheme" | "too_long";
 
@@ -55,10 +56,16 @@ export interface AppDeps {
   cache: LinkCache;
   redis: Redis;
   events: EventPublisher;
+  /**
+   * Supplies the leaderboard already computed by the live feed. Without it the
+   * endpoint falls back to computing its own, which is correct but does the
+   * expensive union once per request.
+   */
+  trendingSnapshot?: () => TrendingEntry[];
 }
 
 export function createApp(deps: AppDeps): Express {
-  const { prisma, cache, redis, events } = deps;
+  const { prisma, cache, redis, events, trendingSnapshot } = deps;
   const app = express();
   const resolveLink = createLinkResolver(prisma, cache);
 
@@ -153,6 +160,15 @@ export function createApp(deps: AppDeps): Express {
         shortUrl: `${originFor(req)}/${link.code}`,
         createdAt: link.createdAt.toISOString(),
       });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.get("/trending", async (_req, res, next) => {
+    try {
+      const entries = trendingSnapshot?.() ?? (await readTrending(redis));
+      return res.json({ window: `${config.trending.windowMinutes}m`, entries });
     } catch (error) {
       return next(error);
     }

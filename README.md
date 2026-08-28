@@ -1,7 +1,7 @@
 # URL Shortener with Real-Time Analytics
 
 A URL shortener built phase by phase, each phase introducing one piece of
-distributed-systems machinery and the reasoning behind it. **Phases 0 through 4 are
+distributed-systems machinery and the reasoning behind it. **Phases 0 through 5 are
 complete and tested.**
 
 - Node 22 · TypeScript (strict) · Express
@@ -10,7 +10,7 @@ complete and tested.**
 - Structured JSON logging via pino, with per-request correlation ids
 - Kafka (KRaft) for the durable click-event log
 - Docker Compose for local infrastructure
-- 81 tests on `node:test`, no test framework dependency
+- 96 tests on `node:test`, no test framework dependency
 
 ## Quick start
 
@@ -40,6 +40,8 @@ suite drives a real HTTP server against both and cleans up what it creates.
 | `GET`  | `/ready`  | Readiness. `200` when Postgres answers, `503` when it does not. Redis being down does **not** fail this. |
 | `POST` | `/links`  | `201` with the created link. `400` on an invalid `longUrl`, `413` on an oversized body. |
 | `GET`  | `/links/:code/stats` | Click count and unique visitors for one link. |
+| `GET`  | `/trending` | Top links over the trailing window. |
+| `WS`   | `/live`   | Pushes the trending board as it changes. |
 | `GET`  | `/:code`  | `302` to the stored URL with `Cache-Control: no-store`. `404` if unknown. |
 
 ```bash
@@ -443,6 +445,61 @@ batches flush rather than dying with the process.
 
 ---
 
+## Phase 5 — live trending leaderboard
+
+`GET /trending` returns the current board; `ws://host/live` pushes it as it
+changes.
+
+### One sorted set per minute, not one running total
+
+The obvious implementation is a single sorted set and `ZINCRBY` per click. It
+is also wrong: that set never forgets, so a link that went viral last week
+outranks everything current, permanently.
+
+Instead there is one sorted set per minute, each with a TTL slightly longer
+than the window. "Trending" is a `ZUNIONSTORE` across the buckets still alive.
+Old minutes leave the window because Redis has already deleted them — no sweep
+job, no cleanup, no unbounded key growth. Sorted sets make both halves cheap:
+`O(log N)` to increment, `O(log N + K)` to read the top K.
+
+### Bucketed by when the click happened
+
+A click is filed under `occurredAt`, not under the time the consumer got round
+to it. Otherwise a consumer restarting and replaying an hour of Kafka backlog
+would pour all of it into the current minute and invent a spike that never
+happened. There is a test for exactly that, because Phase 4 made backlog replay
+a normal event rather than a rare one.
+
+### Computed once per tick, not once per client
+
+The union is the expensive part. It runs on a timer and the result fans out to
+every connected socket from memory, so cost is a function of the refresh
+interval rather than of how many people are watching. `GET /trending` serves
+that same cached snapshot instead of recomputing.
+
+This is the actual argument for pushing rather than polling: with N clients
+polling independently, Redis does N unions per interval. Here it does one.
+Server-sent events would serve this equally well — the traffic is entirely
+one-directional — but a WebSocket leaves room for the next obvious feature,
+subscribing to a single link's live count.
+
+### Slow clients are dropped, not buffered
+
+If a client stops draining its socket, the outbound buffer grows inside our
+process until memory runs out. Past a megabyte the socket is terminated. A
+leaderboard is worthless when stale, so there is nothing worth queueing for a
+client that cannot keep up.
+
+### Failure behaviour
+
+The leaderboard is derived data, so it is never allowed to break anything
+upstream. A failed refresh keeps serving the previous snapshot. A failed
+`recordClicks` in the consumer is logged and swallowed — it happens *after* the
+durable Postgres write, and the counters rebuild as the window rolls forward.
+Redis holding a derived counter must never block the system of record.
+
+---
+
 ## Known limitations
 
 Deliberately unaddressed at this phase, and the honest answers if asked:
@@ -468,7 +525,7 @@ Deliberately unaddressed at this phase, and the honest answers if asked:
 - [x] **Phase 2** — Rate limiter (Redis)
 - [x] **Phase 3** — Redirect events via Redis pub/sub
 - [x] **Phase 4** — Swap pub/sub for Kafka/RabbitMQ
-- [ ] **Phase 5** — Live trending leaderboard (WebSockets + Redis sorted sets)
+- [x] **Phase 5** — Live trending leaderboard (WebSockets + Redis sorted sets)
 - [ ] **Phase 6** — Postgres read replica + read/write split
 - [ ] **Phase 7** — Partition the click-events table
 - [ ] **Phase 8** — Dockerize all services + compose

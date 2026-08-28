@@ -3,6 +3,8 @@ import Redis from "ioredis";
 import { createBatcher } from "./batch.js";
 import { CLICK_CHANNEL, parseClickEvent, type ClickEvent } from "./events.js";
 import { CLICK_TOPIC, createKafka, ensureClickTopic } from "./kafka.js";
+import { recordClicks } from "./trending.js";
+import { createRedis } from "./redis.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 
@@ -15,6 +17,7 @@ import { logger } from "./logger.js";
  * insert compete with a redirect for the same event loop.
  */
 const prisma = new PrismaClient();
+const redis = createRedis("consumer");
 const shutdownHooks: Array<() => Promise<void>> = [];
 
 async function writeClicks(events: ClickEvent[]): Promise<void> {
@@ -30,6 +33,14 @@ async function writeClicks(events: ClickEvent[]): Promise<void> {
       referer: event.referer ?? null,
       ipHash: event.ipHash ?? null,
     })),
+  });
+
+  // Feed the live leaderboard. Deliberately after the durable write and
+  // deliberately not fatal: Redis holding a derived counter must not be able
+  // to block the system of record, and the counters rebuild as the window
+  // rolls forward anyway.
+  await recordClicks(redis, events).catch((error) => {
+    logger.warn({ err: error }, "trending update failed, leaderboard will lag");
   });
 
   logger.debug({ count: events.length }, "click batch written");
@@ -163,7 +174,7 @@ async function shutdown(signal: string): Promise<void> {
     await hook().catch((error) => logger.warn({ err: error }, "shutdown hook failed"));
   }
 
-  await prisma.$disconnect().catch(() => {});
+  await Promise.allSettled([prisma.$disconnect(), redis.quit().catch(() => redis.disconnect())]);
   process.exit(0);
 }
 

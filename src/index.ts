@@ -4,6 +4,7 @@ import { createLinkCache } from "./cache.js";
 import { createRedisEventPublisher, type EventPublisher } from "./events.js";
 import { createKafka, createKafkaEventPublisher, ensureClickTopic } from "./kafka.js";
 import { closeRedis, createRedis } from "./redis.js";
+import { attachLiveFeed } from "./liveFeed.js";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 
@@ -34,9 +35,24 @@ if (config.eventTransport === "kafka") {
   events = createRedisEventPublisher(redis, noteDroppedEvent);
 }
 
-const server = createApp({ prisma, cache, redis, events }).listen(config.port, () => {
+// Declared before createApp so the route can read the feed's snapshot, and
+// assigned after listen() because the WebSocket server attaches to the HTTP
+// server.
+let liveFeed: ReturnType<typeof attachLiveFeed> | null = null;
+
+const app = createApp({
+  prisma,
+  cache,
+  redis,
+  events,
+  trendingSnapshot: () => liveFeed?.snapshot() ?? [],
+});
+
+const server = app.listen(config.port, () => {
   logger.info({ port: config.port, transport: config.eventTransport }, "listening");
 });
+
+liveFeed = attachLiveFeed(server, redis);
 
 /** How long in-flight requests get to finish before we stop being polite. */
 const SHUTDOWN_GRACE_MS = 10_000;
@@ -58,6 +74,9 @@ async function shutdown(signal: string): Promise<void> {
   }, SHUTDOWN_GRACE_MS);
   forceExit.unref();
 
+  // Close WebSocket clients first: server.close() waits for connections to
+  // end, and an open socket would otherwise hold it until the force-exit.
+  await liveFeed?.close();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   // Flush buffered producer batches before the socket closes, or the last
   // events of a deploy are lost for no reason.

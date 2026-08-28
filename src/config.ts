@@ -95,6 +95,18 @@ export const config = {
     partitions: readInteger("CLICK_TOPIC_PARTITIONS", 3),
   },
 
+  trending: {
+    /** Length of the sliding window, in one-minute buckets. */
+    windowMinutes: readInteger("TRENDING_WINDOW_MINUTES", 10),
+    limit: readInteger("TRENDING_LIMIT", 10),
+    /**
+     * How often the leaderboard is recomputed and pushed. The union across
+     * buckets is the expensive part, so it happens on this timer and is shared
+     * by every connected client rather than recomputed per request.
+     */
+    refreshMs: readInteger("TRENDING_REFRESH_MS", 2_000),
+  },
+
   /** Analytics batching: flush on whichever trigger fires first. */
   clickBatch: {
     maxSize: readInteger("CLICK_BATCH_SIZE", 100),
