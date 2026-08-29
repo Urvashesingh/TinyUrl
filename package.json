@@ -21,7 +21,9 @@
     "k8s:render": "kubectl kustomize k8s/",
     "k8s:validate": "kubectl kustomize k8s/ | docker run --rm -i ghcr.io/yannh/kubeconform:latest -strict -summary -kubernetes-version 1.30.0 -",
     "loadtest": "docker run --rm -i --network url-shortener_default -v \"%cd%/loadtest:/scripts\" grafana/k6:latest run /scripts/redirect.js",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "traffic": "tsx scripts/traffic.ts",
+    "demo:reset": "tsx scripts/demo.ts --reset"
   },
   "dependencies": {
     "@prisma/client": "^6.2.1",
