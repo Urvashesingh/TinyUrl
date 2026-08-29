@@ -2,6 +2,10 @@ apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
+    # Pinned, not auto-generated. The dashboard JSON references this uid, and
+    # Grafana invents a random one when it is omitted -- which leaves every
+    # panel pointing at a datasource that does not exist.
+    uid: prometheus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
