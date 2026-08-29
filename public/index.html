@@ -31,23 +31,8 @@
 
   .wrap { max-width: 1080px; margin: 0 auto; }
 
-  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 6px; }
+  header { margin-bottom: 22px; }
   h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
-  .sub { color: var(--muted); font-size: 14px; margin: 0 0 22px; }
-
-  .status { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
-  .pill {
-    font: 12px/1 var(--mono);
-    padding: 6px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--line);
-    background: var(--panel);
-    color: var(--muted);
-    white-space: nowrap;
-  }
-  .pill b { color: var(--text); font-weight: 600; }
-  .pill.ok b { color: var(--good); }
-  .pill.off b { color: var(--muted); }
 
   .panel {
     background: var(--panel);
@@ -159,13 +144,6 @@
     100% { box-shadow: 0 0 0 0 rgba(61,220,151,0); }
   }
 
-  .note {
-    margin-top: 20px;
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.6;
-  }
-  .note code { font-family: var(--mono); color: var(--text); }
   a { color: var(--accent); }
 </style>
 </head>
@@ -174,9 +152,7 @@
 
   <header>
     <h1>URL Shortener</h1>
-    <div class="status" id="status"></div>
   </header>
-  <p class="sub">Local console. Create a link, follow it, watch the leaderboard react.</p>
 
   <div class="panel">
     <h2>Create a short link</h2>
@@ -203,12 +179,6 @@
     </div>
   </div>
 
-  <p class="note">
-    Trending is pushed over a WebSocket from Redis sorted sets, and only counts
-    clicks inside the trailing window. Click counts come from Postgres, written
-    by a separate consumer reading the Kafka log — so they appear a moment after
-    the redirect, on purpose: the redirect never waits on analytics.
-  </p>
 
 </div>
 
@@ -239,28 +209,19 @@
     return h;
   }
 
-  // ---- status strip ----------------------------------------------------
+  // ---- profile detection -----------------------------------------------
+  // Nothing is rendered from this. It only decides whether to open the
+  // WebSocket, since the minimal profile has no process to keep one alive.
   var profile = "full";
-
-  function pill(cls, label, value) {
-    return '<span class="pill ' + cls + '">' + esc(label) + ' <b>' + esc(value) + "</b></span>";
-  }
 
   function loadStatus() {
     fetch("/ready")
       .then(function (r) { return r.json(); })
       .then(function (d) {
         profile = d.profile || "full";
-        var bits = [pill("ok", "db", "ready"), pill("", "profile", profile)];
-        if (typeof d.replicaLagSeconds === "number") {
-          bits.push(pill("", "replica lag", d.replicaLagSeconds.toFixed(1) + "s"));
-        }
-        el("status").innerHTML = bits.join("");
         if (profile === "minimal") { minimalMode(); }
       })
-      .catch(function () {
-        el("status").innerHTML = pill("", "db", "unreachable");
-      });
+      .catch(function () { /* leave the default and let the socket decide */ });
   }
 
   function minimalMode() {
@@ -416,7 +377,6 @@
   loadRecent();
   setTimeout(connectLive, 300);
   setInterval(loadRecent, 5000);
-  setInterval(loadStatus, 15000);
 })();
 </script>
 </body>

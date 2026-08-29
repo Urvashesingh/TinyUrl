@@ -10,7 +10,9 @@ WORKDIR /app
 # `prisma generate`, which reads the schema.
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
-RUN npm ci
+# Retries because a dropped connection to the registry mid-build is common
+# enough to be worth surviving, and the default is a single attempt.
+RUN npm ci --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
 
 COPY tsconfig.json ./
 COPY src ./src
@@ -32,7 +34,9 @@ COPY prisma ./prisma
 # --ignore-scripts because postinstall would run `prisma generate`, and the
 # Prisma CLI is a devDependency that is deliberately not in this image. The
 # generated client is copied from the build stage instead.
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+RUN npm ci --omit=dev --ignore-scripts \
+      --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000 \
+    && npm cache clean --force
 
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/dist ./dist
