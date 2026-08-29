@@ -2,7 +2,7 @@
 
 # --- build -------------------------------------------------------------
 # Full dependency tree, TypeScript compiler, Prisma generation.
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 
 # Copied before the source so a source-only change does not invalidate the
@@ -23,7 +23,7 @@ RUN npm run build
 
 # --- runtime -----------------------------------------------------------
 # Production dependencies only, no compiler, no test tooling.
-FROM node:22-alpine AS runtime
+FROM node:26-alpine AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production
