@@ -26,7 +26,7 @@
     "demo:reset": "tsx scripts/demo.ts --reset"
   },
   "dependencies": {
-    "@prisma/client": "^6.2.1",
+    "@prisma/client": "^7.10.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "ioredis": "^6.0.0",
