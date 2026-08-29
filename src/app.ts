@@ -183,8 +183,15 @@ export function createApp(deps: AppDeps): Express {
     let replicaLagSeconds: number | null = null;
     if (replica !== prisma) {
       try {
+        // Report 0 when the replica has replayed everything it has received.
+        // pg_last_xact_replay_timestamp() is the time of the last *replayed
+        // transaction*, so on a quiet system it ages forward and a fully
+        // caught-up replica appears to be minutes behind.
         const [row] = await replica.$queryRaw<Array<{ lag: number | null }>>`
-          SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::float8 AS lag
+          SELECT CASE
+                   WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
+                   ELSE EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))
+                 END::float8 AS lag
         `;
         replicaLagSeconds = row?.lag ?? 0;
       } catch {
